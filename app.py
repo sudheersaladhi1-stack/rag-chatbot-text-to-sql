@@ -9,7 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 
-# Import your RAG chain
+# Import your RAG chain (WORKING ONE)
 from src.rag_chat_memory import rag_chain_with_memory
 
 
@@ -36,7 +36,6 @@ def highlight_text(text: str, query: str):
 
 
 def format_docs(docs):
-    """Convert retrieved docs to a single context string"""
     return "\n\n".join(doc.page_content for doc in docs)
 
 
@@ -74,8 +73,20 @@ def load_retriever(collection_name: str):
     vectorstore = get_vectorstore(collection_name)
     return vectorstore.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 6}  # over-fetch
+        search_kwargs={"k": 6}
     )
+
+
+def clear_collection(collection_name: str):
+    """Safely clears only the selected collection"""
+    vectorstore = get_vectorstore(collection_name)
+    try:
+        vectorstore._collection.delete(where={})
+        vectorstore._collection.persist()
+        return True
+    except Exception as e:
+        st.error(f"Failed to clear DB: {e}")
+        return False
 
 
 # =====================================================
@@ -99,6 +110,9 @@ uploaded_files = st.sidebar.file_uploader(
 
 retriever = load_retriever(collection_name)
 
+# -----------------------------------------------------
+# Ingest documents
+# -----------------------------------------------------
 if st.sidebar.button("📥 Ingest documents"):
     if not uploaded_files:
         st.sidebar.warning("Please upload at least one file.")
@@ -128,13 +142,13 @@ if st.sidebar.button("📥 Ingest documents"):
 
             chunks = splitter.split_documents(all_docs)
 
-            # Deduplicate chunks BEFORE inserting
+            # Deduplicate safely
             def doc_hash(text: str) -> str:
                 return hashlib.md5(text.encode("utf-8")).hexdigest()
 
             unique_chunks = {}
             for chunk in chunks:
-                chunk.metadata["person"] = collection_name
+                chunk.metadata["collection"] = collection_name
                 h = doc_hash(chunk.page_content)
                 if h not in unique_chunks:
                     unique_chunks[h] = chunk
@@ -143,6 +157,19 @@ if st.sidebar.button("📥 Ingest documents"):
             vectorstore.add_documents(list(unique_chunks.values()))
 
         st.sidebar.success("Documents added successfully ✅")
+        st.rerun()
+
+
+# -----------------------------------------------------
+# CLEAR DATABASE BUTTON (🔥 IMPORTANT)
+# -----------------------------------------------------
+st.sidebar.divider()
+
+if st.sidebar.button("🗑️ Clear knowledge base"):
+    if clear_collection(collection_name):
+        st.session_state.messages = []
+        st.sidebar.success("Knowledge base cleared ✅")
+        st.rerun()
 
 
 # =====================================================
@@ -153,6 +180,19 @@ if "session_id" not in st.session_state:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+
+# =====================================================
+# Disable chat if DB empty
+# =====================================================
+vectorstore = get_vectorstore(collection_name)
+doc_count = vectorstore._collection.count()
+
+st.sidebar.caption(f"📄 Documents in DB: {doc_count}")
+
+if doc_count == 0:
+    st.info("📂 Knowledge base is empty. Upload documents to start.")
+    st.stop()
 
 
 # =====================================================
@@ -182,7 +222,7 @@ for msg in st.session_state.messages:
 user_input = st.chat_input("Ask a question based on the uploaded documents...")
 
 if user_input:
-    # --- User message ---
+    # User message
     st.session_state.messages.append(
         {"role": "user", "content": user_input}
     )
@@ -190,9 +230,9 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # =================================================
-    # Retrieve EXACTLY 3 UNIQUE CHUNKS
-    # =================================================
+    # -------------------------------------------------
+    # Retrieve EXACTLY 3 UNIQUE chunks
+    # -------------------------------------------------
     raw_docs = retriever.invoke(user_input)
 
     seen = set()
@@ -208,9 +248,9 @@ if user_input:
 
     context_text = format_docs(retrieved_docs)
 
-    # =================================================
-    # Generate answer (PASS CONTEXT EXPLICITLY)
-    # =================================================
+    # -------------------------------------------------
+    # Generate answer
+    # -------------------------------------------------
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             response = rag_chain_with_memory.invoke(
@@ -239,7 +279,7 @@ if user_input:
                     )
                     st.markdown("---")
 
-    # --- Save assistant message ---
+    # Save assistant message
     st.session_state.messages.append(
         {
             "role": "assistant",
