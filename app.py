@@ -9,17 +9,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 
-# Import your RAG chain (Step 6)
+# Import your RAG chain
 from src.rag_chat_memory import rag_chain_with_memory
 
 
 # =====================================================
-# Utility: Highlight matched text (STEP 10)
+# Utility: Highlight matched text
 # =====================================================
 def highlight_text(text: str, query: str):
-    """
-    Highlight query keywords inside retrieved text
-    """
     if not query:
         return text
 
@@ -48,15 +45,16 @@ st.set_page_config(
 )
 
 st.title("🤖 RAG Chatbot")
-st.caption("Chat + File Upload + Retrieved Context Highlighting")
+st.caption("Chat + File Upload + Retrieved Context (3 chunks guaranteed)")
 
 
 # =====================================================
-# Embeddings & Vectorstore helpers
+# Embeddings & Vectorstore
 # =====================================================
 embedding_model = SentenceTransformerEmbeddings(
     model_name="all-MiniLM-L6-v2"
 )
+
 
 def get_vectorstore(collection_name: str):
     return Chroma(
@@ -70,16 +68,18 @@ def get_vectorstore(collection_name: str):
 def load_retriever(collection_name: str):
     vectorstore = get_vectorstore(collection_name)
     return vectorstore.as_retriever(
-    search_type="similarity",
-    search_kwargs={
-        "k": 3
-    }
+        search_type="similarity",
+        search_kwargs={
+            "k": 6,        # over-fetch
+            "fetch_k": 12
+        }
     )
 
+
 # =====================================================
-# Sidebar: File upload & incremental ingestion (STEP 9)
+# Sidebar: Collection + Upload
 # =====================================================
-st.sidebar.header("🗂️ Select Collection")
+st.sidebar.header("🗂️ Collection")
 
 collection_name = st.sidebar.text_input(
     "Collection name",
@@ -96,6 +96,7 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 retriever = load_retriever(collection_name)
+
 if st.sidebar.button("📥 Ingest documents"):
     if not uploaded_files:
         st.sidebar.warning("Please upload at least one file.")
@@ -105,35 +106,38 @@ if st.sidebar.button("📥 Ingest documents"):
 
             for file in uploaded_files:
                 temp_path = f"temp_{file.name}"
-
                 with open(temp_path, "wb") as f:
                     f.write(file.read())
 
-                if file.name.endswith(".pdf"):
-                    loader = PyPDFLoader(temp_path)
-                else:
-                    loader = TextLoader(temp_path, encoding="utf-8")
+                loader = (
+                    PyPDFLoader(temp_path)
+                    if file.name.endswith(".pdf")
+                    else TextLoader(temp_path, encoding="utf-8")
+                )
 
                 all_docs.extend(loader.load())
                 os.remove(temp_path)
 
             splitter = RecursiveCharacterTextSplitter(
-                 chunk_size=600,
+                chunk_size=600,
                 chunk_overlap=150,
                 separators=["\n\n", "\n", ".", " "]
-                    )
+            )
 
             chunks = splitter.split_documents(all_docs)
+
+            # Deduplicate before storing
             def doc_hash(text: str) -> str:
-             return hashlib.md5(text.encode("utf-8")).hexdigest()
-            
+                return hashlib.md5(text.encode("utf-8")).hexdigest()
+
             unique_chunks = {}
             for chunk in chunks:
-                 h = doc_hash(chunk.page_content)
-                 if h not in unique_chunks:
-                        unique_chunks[h] = chunk
+                h = doc_hash(chunk.page_content)
+                if h not in unique_chunks:
+                    unique_chunks[h] = chunk
+
             vectorstore = get_vectorstore(collection_name)
-            vectorstore.add_documents(chunks)
+            vectorstore.add_documents(list(unique_chunks.values()))
 
         st.sidebar.success("Documents added successfully ✅")
 
@@ -149,7 +153,7 @@ if "messages" not in st.session_state:
 
 
 # =====================================================
-# Display chat history (with highlighted context)
+# Display chat history
 # =====================================================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -162,13 +166,8 @@ for msg in st.session_state.messages:
                         doc.page_content,
                         msg.get("query", "")
                     )
-
                     st.markdown(
-                        f"""
-                        **Chunk {i}**
-
-                        {highlighted}
-                        """,
+                        f"**Chunk {i}**\n\n{highlighted}",
                         unsafe_allow_html=True
                     )
                     st.markdown("---")
@@ -177,33 +176,46 @@ for msg in st.session_state.messages:
 # =====================================================
 # Chat input
 # =====================================================
-user_input = st.chat_input(
-    "Ask a question based on the uploaded documents..."
-)
+user_input = st.chat_input("Ask a question based on the uploaded documents...")
 
 if user_input:
-    # --- User message ---
+    # User message
     st.session_state.messages.append(
         {"role": "user", "content": user_input}
     )
+
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # --- Retrieve context (for display only) ---
-    retrieved_docs = retriever.invoke(user_input)
+    # =================================================
+    # Retrieve + FORCE EXACTLY 3 UNIQUE CHUNKS
+    # =================================================
+    raw_docs = retriever.invoke(user_input)
+
     seen = set()
-    filtered_docs = []
+    final_docs = []
 
-    for doc in retrieved_docs:
-        key = doc.page_content.strip()
-        if key not in seen:
-            seen.add(key)
-            filtered_docs.append(doc)
+    for doc in raw_docs:
+        text = doc.page_content.strip()
+        if text and text not in seen:
+            seen.add(text)
+            final_docs.append(doc)
+        if len(final_docs) == 3:
+            break
 
-    retrieved_docs = filtered_docs
+    # Fallback padding
+    if len(final_docs) < 3:
+        for doc in raw_docs:
+            if doc not in final_docs:
+                final_docs.append(doc)
+            if len(final_docs) == 3:
+                break
 
+    retrieved_docs = final_docs
 
-    # --- Generate answer ---
+    # =================================================
+    # Generate answer
+    # =================================================
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             response = rag_chain_with_memory.invoke(
@@ -214,6 +226,7 @@ if user_input:
                     }
                 }
             )
+
             st.markdown(response)
 
             with st.expander("🔍 Show retrieved context"):
@@ -223,16 +236,12 @@ if user_input:
                         user_input
                     )
                     st.markdown(
-                        f"""
-                        **Chunk {i}**
-
-                        {highlighted}
-                        """,
+                        f"**Chunk {i}**\n\n{highlighted}",
                         unsafe_allow_html=True
                     )
                     st.markdown("---")
 
-    # --- Save assistant message ONCE ---
+    # Save assistant message
     st.session_state.messages.append(
         {
             "role": "assistant",
