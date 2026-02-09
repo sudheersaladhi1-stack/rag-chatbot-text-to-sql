@@ -70,8 +70,7 @@ def load_retriever(collection_name: str):
     return vectorstore.as_retriever(
         search_type="similarity",
         search_kwargs={
-            "k": 6,        # over-fetch
-            "fetch_k": 12
+            "k": 6   # over-fetch here, trim later to 3
         }
     )
 
