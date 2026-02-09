@@ -147,24 +147,37 @@ if st.sidebar.button("📥 Ingest documents"):
 
             chunks = splitter.split_documents(all_docs)
 
-            # Deduplicate safely
-            def doc_hash(text: str) -> str:
-                return hashlib.md5(text.encode("utf-8")).hexdigest()
+            # 🔐 Strong deduplication (collection + source aware)
+            def doc_hash(text: str, source: str) -> str:
+                return hashlib.md5(
+                    f"{collection_name}:{source}:{text}".encode("utf-8")
+                ).hexdigest()
 
             unique_chunks = {}
             for chunk in chunks:
                 chunk.metadata["collection"] = collection_name
-                h = doc_hash(chunk.page_content)
+                source = chunk.metadata.get("source", "")
+                h = doc_hash(chunk.page_content, source)
                 if h not in unique_chunks:
                     unique_chunks[h] = chunk
 
             vectorstore = get_vectorstore(collection_name)
-            vectorstore.add_documents(list(unique_chunks.values()))
+
+            documents = []
+            ids = []
+
+            for h, chunk in unique_chunks.items():
+                documents.append(chunk)
+                ids.append(h)
+
+            vectorstore.add_documents(
+                documents=documents,
+                ids=ids
+            )
 
         st.sidebar.success("Documents added successfully ✅")
+        st.cache_resource.clear()
         st.rerun()
-
-
 # -----------------------------------------------------
 # CLEAR DATABASE BUTTON (🔥 IMPORTANT)
 # -----------------------------------------------------
