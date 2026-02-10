@@ -271,10 +271,25 @@ if user_input:
             st.markdown("I don't know based on the provided context.")
         st.stop()
 
+    def extract_person_names(text: str):
+    # very simple heuristic (works well for resumes)
+        return {
+        word.lower()
+        for word in re.findall(r"[A-Z][a-z]+", text)
+    }
+
     context_text = format_docs(retrieved_docs)
-    if "working" in user_input.lower() and "work" not in context_text.lower():
-         st.markdown("I don't know based on the provided context.")
-         st.stop()
+    question_names = extract_person_names(user_input)
+    context_names = extract_person_names(context_text)
+
+# If user asked about a person NOT present in context → block
+    if question_names and not (question_names & context_names):
+        with st.chat_message("assistant"):
+            st.markdown("I don't know based on the provided context.")
+        st.stop()
+    # if "working" in user_input.lower() and "work" not in context_text.lower():
+    #      st.markdown("I don't know based on the provided context.")
+    #      st.stop()
     # -------------------------------------------------
     # Generate answer
     # -------------------------------------------------
