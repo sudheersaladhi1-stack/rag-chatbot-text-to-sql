@@ -66,6 +66,7 @@ Answer the user's question using ONLY the provided context.
 Rules:
 - You MAY summarize, infer, or rephrase information that is clearly present in the context.
 - If the context contains enough information to answer the question, provide a clear and concise answer.
+- DO NOT use chat history, prior knowledge, or assumptions.
 - If the context does NOT contain sufficient information, reply EXACTLY with:
 "I don't know based on the provided context."
 

@@ -182,6 +182,7 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
 
         # Clear UI messages
         st.session_state.messages = []
+        st.session_state.session_id = str(uuid4())  # 🔥 NEW SESSION
 
         st.sidebar.success("Knowledge base cleared successfully ✅")
         st.rerun()
@@ -271,7 +272,9 @@ if user_input:
         st.stop()
 
     context_text = format_docs(retrieved_docs)
-
+    if "working" in user_input.lower() and "work" not in context_text.lower():
+         st.markdown("I don't know based on the provided context.")
+         st.stop()
     # -------------------------------------------------
     # Generate answer
     # -------------------------------------------------
