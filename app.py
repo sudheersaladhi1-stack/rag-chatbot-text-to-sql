@@ -3,57 +3,85 @@ from uuid import uuid4
 import os
 import re
 import hashlib
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 
-# Import your WORKING RAG chain + memory store
+# WORKING RAG chain + memory store
 from src.rag_chat_memory import rag_chain_with_memory, store
 
 
 # =====================================================
-# Utility: Highlight matched text
+# Utilities
 # =====================================================
 def highlight_text(text: str, query: str):
     if not query:
         return text
 
     keywords = {
-        word.lower()
-        for word in re.findall(r"\w+", query)
-        if len(word) > 2
+        w.lower()
+        for w in re.findall(r"\w+", query)
+        if len(w) > 2
     }
 
-    def replacer(match):
-        word = match.group(0)
-        if word.lower() in keywords:
-            return f"<mark>{word}</mark>"
-        return word
+    def repl(match):
+        w = match.group(0)
+        return f"<mark>{w}</mark>" if w.lower() in keywords else w
 
-    return re.sub(r"\w+", replacer, text)
+    return re.sub(r"\w+", repl, text)
 
 
 def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+    return "\n\n".join(d.page_content for d in docs)
+
+
+def extract_person_names(text: str):
+    return {w.lower() for w in re.findall(r"[A-Z][a-z]+", text)}
+
+
+# =====================================================
+# URL Loader
+# =====================================================
+def load_url_as_documents(url: str):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+        tag.decompose()
+
+    text = "\n".join(
+        line.strip()
+        for line in soup.get_text("\n").splitlines()
+        if line.strip()
+    )
+
+    return [{
+        "page_content": text,
+        "metadata": {
+            "source": urlparse(url).netloc,
+            "type": "url",
+            "url": url
+        }
+    }]
 
 
 # =====================================================
 # Streamlit config
 # =====================================================
-st.set_page_config(
-    page_title="RAG Chatbot",
-    page_icon="🤖",
-    layout="centered"
-)
-
+st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
 st.title("🤖 RAG Chatbot")
-st.caption("Chat + File Upload + Retrieved Context (3 chunks guaranteed)")
+st.caption("PDF / TXT / URL → Strict RAG (No Hallucination)")
 
 
 # =====================================================
-# Embeddings & Vectorstore
+# Vectorstore
 # =====================================================
 embedding_model = SentenceTransformerEmbeddings(
     model_name="all-MiniLM-L6-v2"
@@ -70,125 +98,115 @@ def get_vectorstore(collection_name: str):
 
 @st.cache_resource(show_spinner=False)
 def load_retriever(collection_name: str):
-    vs = get_vectorstore(collection_name)
-    return vs.as_retriever(
+    return get_vectorstore(collection_name).as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 6}  # over-fetch
+        search_kwargs={"k": 6}
     )
 
 
 # =====================================================
-# Sidebar: Collection + Upload
+# Sidebar
 # =====================================================
 st.sidebar.header("🗂️ Collection")
+collection_name = st.sidebar.text_input("Collection name", value="default")
 
-collection_name = st.sidebar.text_input(
-    "Collection name",
-    value="default",
-    help="Each collection is an independent knowledge base"
-)
-
-st.sidebar.header("📂 Upload Documents")
-
+st.sidebar.header("📂 Upload Files")
 uploaded_files = st.sidebar.file_uploader(
-    "Upload PDF or TXT files",
-    type=["pdf", "txt"],
-    accept_multiple_files=True
+    "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
 )
+
+st.sidebar.header("🌐 Add Website URL")
+url_input = st.sidebar.text_input("Enter website URL")
 
 retriever = load_retriever(collection_name)
 
 
 # =====================================================
-# Ingest documents
+# Ingest Files
 # =====================================================
+def ingest_documents(docs):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=150
+    )
+    chunks = splitter.split_documents(docs)
+
+    def hash_doc(text, source):
+        return hashlib.md5(
+            f"{collection_name}:{source}:{text}".encode()
+        ).hexdigest()
+
+    unique = {}
+    for c in chunks:
+        source = c.metadata.get("source", "")
+        c.metadata["collection"] = collection_name
+        h = hash_doc(c.page_content, source)
+        if h not in unique:
+            unique[h] = c
+
+    vs = get_vectorstore(collection_name)
+    vs.add_documents(
+        documents=list(unique.values()),
+        ids=list(unique.keys())
+    )
+
+
 if st.sidebar.button("📥 Ingest documents"):
     if not uploaded_files:
-        st.sidebar.warning("Please upload at least one file.")
+        st.sidebar.warning("Upload at least one file")
     else:
-        with st.spinner("Ingesting documents..."):
-            all_docs = []
+        with st.spinner("Ingesting files..."):
+            docs = []
+            for f in uploaded_files:
+                tmp = f"temp_{f.name}"
+                with open(tmp, "wb") as t:
+                    t.write(f.read())
 
-            for file in uploaded_files:
-                temp_path = f"temp_{file.name}"
-                with open(temp_path, "wb") as f:
-                    f.write(file.read())
+                loader = PyPDFLoader(tmp) if f.name.endswith(".pdf") else TextLoader(tmp)
+                docs.extend(loader.load())
+                os.remove(tmp)
 
-                loader = (
-                    PyPDFLoader(temp_path)
-                    if file.name.endswith(".pdf")
-                    else TextLoader(temp_path, encoding="utf-8")
-                )
+            ingest_documents(docs)
 
-                all_docs.extend(loader.load())
-                os.remove(temp_path)
-
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=600,
-                chunk_overlap=150,
-                separators=["\n\n", "\n", ".", " "]
-            )
-
-            chunks = splitter.split_documents(all_docs)
-
-            # 🔐 Strong deduplication (collection + source aware)
-            def doc_hash(text: str, source: str) -> str:
-                return hashlib.md5(
-                    f"{collection_name}:{source}:{text}".encode("utf-8")
-                ).hexdigest()
-
-            unique_chunks = {}
-            for chunk in chunks:
-                source = chunk.metadata.get("source", "")
-                chunk.metadata["collection"] = collection_name
-                h = doc_hash(chunk.page_content, source)
-                if h not in unique_chunks:
-                    unique_chunks[h] = chunk
-
-            vectorstore = get_vectorstore(collection_name)
-
-            documents = []
-            ids = []
-
-            for h, chunk in unique_chunks.items():
-                documents.append(chunk)
-                ids.append(h)
-
-            vectorstore.add_documents(documents=documents, ids=ids)
-
-        st.sidebar.success("Documents added successfully ✅")
         st.cache_resource.clear()
+        st.sidebar.success("Documents added ✅")
         st.rerun()
 
 
 # =====================================================
-# Clear knowledge base (🔥 CRITICAL FIX)
+# Ingest URL
+# =====================================================
+if st.sidebar.button("🌍 Ingest URL"):
+    if not url_input:
+        st.sidebar.warning("Enter a valid URL")
+    else:
+        with st.spinner("Fetching website..."):
+            url_docs = load_url_as_documents(url_input)
+            ingest_documents([
+                type("Doc", (), d) for d in url_docs
+            ])
+
+        st.cache_resource.clear()
+        st.sidebar.success("Website added ✅")
+        st.rerun()
+
+
+# =====================================================
+# Clear Knowledge Base
 # =====================================================
 st.sidebar.divider()
 
 if st.sidebar.button("🗑️ Clear knowledge base"):
-    try:
-        vs = get_vectorstore(collection_name)
-        ids = vs._collection.get().get("ids", [])
+    vs = get_vectorstore(collection_name)
+    ids = vs._collection.get().get("ids", [])
+    if ids:
+        vs._collection.delete(ids=ids)
 
-        if ids:
-            vs._collection.delete(ids=ids)
-
-        # Clear retriever cache
-        st.cache_resource.clear()
-
-        # Clear LangChain memory
-        store.clear()
-
-        # Clear UI messages
-        st.session_state.messages = []
-        st.session_state.session_id = str(uuid4())  # 🔥 NEW SESSION
-
-        st.sidebar.success("Knowledge base cleared successfully ✅")
-        st.rerun()
-
-    except Exception as e:
-        st.sidebar.error(f"Failed to clear DB: {e}")
+    store.clear()
+    st.cache_resource.clear()
+    st.session_state.clear()
+    st.sidebar.success("Knowledge base cleared ✅")
+    st.rerun()
 
 
 # =====================================================
@@ -202,131 +220,75 @@ if "messages" not in st.session_state:
 
 
 # =====================================================
-# Disable chat if DB empty
+# Disable chat if empty
 # =====================================================
-vectorstore = get_vectorstore(collection_name)
-doc_count = vectorstore._collection.count()
-
+doc_count = get_vectorstore(collection_name)._collection.count()
 st.sidebar.caption(f"📄 Documents in DB: {doc_count}")
 
 if doc_count == 0:
-    st.info("📂 Knowledge base is empty. Upload documents to start.")
+    st.info("Upload documents or a URL to start.")
     st.stop()
 
 
 # =====================================================
-# Display chat history
+# Display history
 # =====================================================
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-        if msg["role"] == "assistant" and "docs" in msg:
-            with st.expander("🔍 Show retrieved context"):
-                for i, doc in enumerate(msg["docs"], start=1):
-                    highlighted = highlight_text(
-                        doc.page_content,
-                        msg.get("query", "")
-                    )
-                    st.markdown(
-                        f"**Chunk {i}**\n\n{highlighted}",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown("---")
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
 
 
 # =====================================================
-# Chat input
+# Chat
 # =====================================================
-user_input = st.chat_input("Ask a question based on the uploaded documents...")
+user_input = st.chat_input("Ask a question based on the uploaded knowledge")
 
 if user_input:
-    # User message
-    st.session_state.messages.append(
-        {"role": "user", "content": user_input}
-    )
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
-    with st.chat_message("user"):
-        st.markdown(user_input)
-
-    # -------------------------------------------------
-    # Retrieve EXACTLY 3 UNIQUE chunks
-    # -------------------------------------------------
     raw_docs = retriever.invoke(user_input)
 
-    seen = set()
-    retrieved_docs = []
-
-    for doc in raw_docs:
-        text = doc.page_content.strip()
-        if text and text not in seen:
-            seen.add(text)
-            retrieved_docs.append(doc)
-        if len(retrieved_docs) == 3:
+    seen, retrieved = set(), []
+    for d in raw_docs:
+        t = d.page_content.strip()
+        if t and t not in seen:
+            seen.add(t)
+            retrieved.append(d)
+        if len(retrieved) == 3:
             break
 
-    # Safety: no context → no hallucination
-    if not retrieved_docs:
-        with st.chat_message("assistant"):
-            st.markdown("I don't know based on the provided context.")
+    if not retrieved:
+        st.chat_message("assistant").markdown(
+            "I don't know based on the provided context."
+        )
         st.stop()
 
-    def extract_person_names(text: str):
-    # very simple heuristic (works well for resumes)
-        return {
-        word.lower()
-        for word in re.findall(r"[A-Z][a-z]+", text)
-    }
+    context_text = format_docs(retrieved)
 
-    context_text = format_docs(retrieved_docs)
-    question_names = extract_person_names(user_input)
-    context_names = extract_person_names(context_text)
-
-# If user asked about a person NOT present in context → block
-    if question_names and not (question_names & context_names):
-        with st.chat_message("assistant"):
-            st.markdown("I don't know based on the provided context.")
+    # 🚫 PERSON MISMATCH BLOCK
+    if extract_person_names(user_input) - extract_person_names(context_text):
+        st.chat_message("assistant").markdown(
+            "I don't know based on the provided context."
+        )
         st.stop()
-    # if "working" in user_input.lower() and "work" not in context_text.lower():
-    #      st.markdown("I don't know based on the provided context.")
-    #      st.stop()
-    # -------------------------------------------------
-    # Generate answer
-    # -------------------------------------------------
+
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = rag_chain_with_memory.invoke(
-                {
-                    "input": user_input,
-                    "context": context_text
-                },
-                config={
-                    "configurable": {
-                        "session_id": st.session_state.session_id
-                    }
-                }
-            )
+        response = rag_chain_with_memory.invoke(
+            {"input": user_input, "context": context_text},
+            config={"configurable": {"session_id": st.session_state.session_id}}
+        )
+        st.markdown(response)
 
-            st.markdown(response)
+        with st.expander("🔍 Show retrieved context"):
+            for i, d in enumerate(retrieved, 1):
+                st.markdown(
+                    f"**Chunk {i}**\n\n{highlight_text(d.page_content, user_input)}",
+                    unsafe_allow_html=True
+                )
 
-            with st.expander("🔍 Show retrieved context"):
-                for i, doc in enumerate(retrieved_docs, start=1):
-                    highlighted = highlight_text(
-                        doc.page_content,
-                        user_input
-                    )
-                    st.markdown(
-                        f"**Chunk {i}**\n\n{highlighted}",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown("---")
-
-    # Save assistant message
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": response,
-            "docs": retrieved_docs,
-            "query": user_input
-        }
-    )
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": response,
+        "docs": retrieved,
+        "query": user_input
+    })
