@@ -83,7 +83,6 @@ embedding_model = SentenceTransformerEmbeddings(
 )
 
 
-
 def get_vectorstore(collection):
     return Chroma(
         collection_name=collection,
