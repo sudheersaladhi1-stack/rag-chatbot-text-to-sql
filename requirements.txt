@@ -9,3 +9,7 @@ python-dotenv
 openai
 beautifulsoup4
 requests
+sqlalchemy
+pymysql
+pandas
+langchain-openai

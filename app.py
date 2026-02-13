@@ -13,6 +13,11 @@ from langchain_core.documents import Document
 # RAG chain + memory store
 from src.rag_chat_memory import rag_chain_with_memory, store
 
+import pandas as pd
+from src.text_to_sql.sql_chain import generate_sql
+from src.text_to_sql.sql_guard import is_safe_sql
+from src.text_to_sql.db import run_sql
+
 
 # =====================================================
 # Utilities
@@ -97,7 +102,6 @@ def load_retriever(collection):
         search_type="similarity", search_kwargs={"k": 6}
     )
 
-
 # =====================================================
 # Sidebar
 # =====================================================
@@ -108,6 +112,13 @@ st.sidebar.header("📂 Upload Files")
 uploaded_files = st.sidebar.file_uploader(
     "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
 )
+
+st.sidebar.divider()
+mode = st.sidebar.radio(
+    "Chat Mode",
+    ["📄 Document Q&A (RAG)", "📊 Database Q&A (Text-to-SQL)"]
+)
+
 
 st.sidebar.header("🌐 Add Website URL")
 url_input = st.sidebar.text_input("Enter website URL")
@@ -219,46 +230,100 @@ for msg in st.session_state.messages:
 # =====================================================
 # Chat
 # =====================================================
-user_input = st.chat_input("Ask a question based on the uploaded knowledge")
+user_input = st.chat_input("Ask a question")
 
 if user_input:
-    # 1️⃣ show user message immediately
+    # -------------------------------
+    # 1️⃣ USER MESSAGE (always show)
+    # -------------------------------
     st.session_state.messages.append(
         {"role": "user", "content": user_input}
     )
+
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # retrieve
-    raw_docs = retriever.invoke(user_input)
+    # -------------------------------
+    # 2️⃣ MODE SWITCH
+    # -------------------------------
+    if mode == "📊 Database Q&A (Text-to-SQL)":
+        from src.text_to_sql.sql_chain import generate_sql
+        from src.text_to_sql.sql_guard import is_safe_sql
+        from src.text_to_sql.db import run_sql
+        import pandas as pd
 
-    seen, docs = set(), []
-    for d in raw_docs:
-        t = d.page_content.strip()
-        if t and t not in seen:
-            seen.add(t)
-            docs.append(d)
-        if len(docs) == 3:
-            break
+        with st.chat_message("assistant"):
+            with st.spinner("Generating SQL..."):
+                sql = generate_sql(user_input)
 
-    if not docs:
-        answer = "I don't know based on the provided context."
+            if not is_safe_sql(sql):
+                answer = "I don't know based on the provided context."
+                st.markdown(answer)
+            else:
+                st.markdown("**Generated SQL:**")
+                st.code(sql, language="sql")
+
+                try:
+                    rows, cols = run_sql(sql)
+                    df = pd.DataFrame(rows, columns=cols)
+
+                    st.markdown("**Query Result:**")
+                    st.dataframe(df)
+
+                    answer = "Here are the results based on your data."
+
+                except Exception as e:
+                    answer = f"Database error: {e}"
+                    st.error(answer)
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": answer}
+        )
+
+    # -------------------------------
+    # 3️⃣ RAG MODE (STRICT)
+    # -------------------------------
     else:
-        context = format_docs(docs)
+        raw_docs = retriever.invoke(user_input)
 
-        # person mismatch guard
-        if extract_person_names(user_input) - extract_person_names(context):
+        seen, docs = set(), []
+        for d in raw_docs:
+            t = d.page_content.strip()
+            if t and t not in seen:
+                seen.add(t)
+                docs.append(d)
+            if len(docs) == 3:
+                break
+
+        if not docs:
             answer = "I don't know based on the provided context."
         else:
-            answer = rag_chain_with_memory.invoke(
-                {"input": user_input, "context": context},
-                config={"configurable": {"session_id": st.session_state.session_id}},
-            )
+            context = format_docs(docs)
 
-    # assistant
-    with st.chat_message("assistant"):
-        st.markdown(answer)
+            # 🚫 PERSON NAME MISMATCH GUARD
+            if extract_person_names(user_input) - extract_person_names(context):
+                answer = "I don't know based on the provided context."
+            else:
+                answer = rag_chain_with_memory.invoke(
+                    {"input": user_input, "context": context},
+                    config={
+                        "configurable": {
+                            "session_id": st.session_state.session_id
+                        }
+                    },
+                )
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": answer}
-    )
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+
+            if docs:
+                with st.expander("🔍 Show retrieved context"):
+                    for i, d in enumerate(docs, 1):
+                        st.markdown(
+                            f"**Chunk {i}**\n\n{highlight_text(d.page_content, user_input)}",
+                            unsafe_allow_html=True,
+                        )
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": answer}
+        )
