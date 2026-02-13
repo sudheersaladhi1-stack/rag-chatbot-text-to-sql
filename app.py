@@ -17,13 +17,13 @@ from src.rag_chat_memory import rag_chain_with_memory, store
 # Text-to-SQL
 from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
-from src.text_to_sql.db import run_sql
+from src.text_to_sql.db import run_sql, engine
 
 
 # =====================================================
 # Utilities
 # =====================================================
-def highlight_text(text: str, query: str):
+def highlight_text(text, query):
     if not query:
         return text
     keywords = {w.lower() for w in re.findall(r"\w+", query) if len(w) > 2}
@@ -40,14 +40,14 @@ def format_docs(docs):
     return "\n\n".join(d.page_content for d in docs)
 
 
-def extract_person_names(text: str):
+def extract_person_names(text):
     return {w.lower() for w in re.findall(r"[A-Z][a-z]+", text)}
 
 
 # =====================================================
 # URL Loader
 # =====================================================
-def load_url_as_documents(url: str):
+def load_url_as_documents(url):
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
     r.raise_for_status()
 
@@ -64,11 +64,7 @@ def load_url_as_documents(url: str):
     return [
         Document(
             page_content=text,
-            metadata={
-                "source": urlparse(url).netloc,
-                "type": "url",
-                "url": url,
-            },
+            metadata={"source": urlparse(url).netloc, "type": "url"},
         )
     ]
 
@@ -78,15 +74,13 @@ def load_url_as_documents(url: str):
 # =====================================================
 st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
 st.title("🤖 RAG Chatbot")
-st.caption("PDF / TXT / URL → Strict RAG | Database → Text-to-SQL")
+st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
 
 
 # =====================================================
 # Vectorstore
 # =====================================================
-embedding_model = SentenceTransformerEmbeddings(
-    model_name="all-MiniLM-L6-v2"
-)
+embedding_model = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
 
 
 def get_vectorstore(collection):
@@ -110,16 +104,29 @@ def load_retriever(collection):
 st.sidebar.header("🗂️ Collection")
 collection_name = st.sidebar.text_input("Collection name", "default")
 
-st.sidebar.header("📂 Upload Files")
-uploaded_files = st.sidebar.file_uploader(
-    "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
-)
-
 st.sidebar.divider()
 mode = st.sidebar.radio(
     "Chat Mode",
     ["📄 Document Q&A (RAG)", "📊 Database Q&A (Text-to-SQL)"]
 )
+
+# =====================================================
+# MODE-AWARE UPLOADERS
+# =====================================================
+uploaded_files = None
+uploaded_tables = None
+
+if mode == "📄 Document Q&A (RAG)":
+    st.sidebar.header("📂 Upload Documents")
+    uploaded_files = st.sidebar.file_uploader(
+        "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
+    )
+
+else:
+    st.sidebar.header("📊 Upload Data Files")
+    uploaded_tables = st.sidebar.file_uploader(
+        "CSV / Excel files", type=["csv", "xlsx"], accept_multiple_files=True
+    )
 
 st.sidebar.header("🌐 Add Website URL")
 url_input = st.sidebar.text_input("Enter website URL")
@@ -128,7 +135,7 @@ retriever = load_retriever(collection_name)
 
 
 # =====================================================
-# Ingest helper
+# Ingest helpers
 # =====================================================
 def ingest_documents(docs):
     splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=150)
@@ -142,50 +149,72 @@ def ingest_documents(docs):
         src = c.metadata.get("source", "")
         c.metadata["collection"] = collection_name
         uid = make_id(c.page_content, src)
-        if uid not in unique:
-            unique[uid] = c
+        unique[uid] = c
 
     vs = get_vectorstore(collection_name)
     vs.add_documents(list(unique.values()), ids=list(unique.keys()))
 
 
-# =====================================================
-# Ingest files
-# =====================================================
-if st.sidebar.button("📥 Ingest documents"):
-    if not uploaded_files:
-        st.sidebar.warning("Upload at least one file")
-    else:
-        docs = []
-        for f in uploaded_files:
-            tmp = f"tmp_{f.name}"
-            with open(tmp, "wb") as t:
-                t.write(f.read())
-            loader = PyPDFLoader(tmp) if f.name.endswith(".pdf") else TextLoader(tmp)
-            docs.extend(loader.load())
-            os.remove(tmp)
+def ingest_table(file):
+    df = (
+        pd.read_csv(file)
+        if file.name.endswith(".csv")
+        else pd.read_excel(file)
+    )
 
-        ingest_documents(docs)
-        st.cache_resource.clear()
-        st.sidebar.success("Documents added ✅")
-        st.rerun()
+    table_name = (
+        os.path.splitext(file.name)[0]
+        .lower()
+        .replace(" ", "_")
+    )
+
+    df.to_sql(table_name, engine, if_exists="replace", index=False)
+    return table_name, df.shape
+
+
+# =====================================================
+# Ingest documents
+# =====================================================
+if st.sidebar.button("📥 Ingest documents") and uploaded_files:
+    docs = []
+    for f in uploaded_files:
+        tmp = f"tmp_{f.name}"
+        with open(tmp, "wb") as t:
+            t.write(f.read())
+        loader = PyPDFLoader(tmp) if f.name.endswith(".pdf") else TextLoader(tmp)
+        docs.extend(loader.load())
+        os.remove(tmp)
+
+    ingest_documents(docs)
+    st.cache_resource.clear()
+    st.sidebar.success("Documents added ✅")
+    st.rerun()
 
 
 # =====================================================
 # Ingest URL
 # =====================================================
-if st.sidebar.button("🌍 Ingest URL"):
-    if not url_input:
-        st.sidebar.warning("Enter a valid URL")
-    else:
-        ingest_documents(load_url_as_documents(url_input))
-        st.cache_resource.clear()
-        st.sidebar.success("Website added ✅")
-        st.rerun()
+if st.sidebar.button("🌍 Ingest URL") and url_input:
+    ingest_documents(load_url_as_documents(url_input))
+    st.cache_resource.clear()
+    st.sidebar.success("Website added ✅")
+    st.rerun()
 
 
 # =====================================================
-# Clear Knowledge Base (SAFE)
+# Ingest CSV / XLSX
+# =====================================================
+if mode == "📊 Database Q&A (Text-to-SQL)" and uploaded_tables:
+    if st.sidebar.button("📥 Ingest Tables"):
+        for f in uploaded_tables:
+            table, shape = ingest_table(f)
+            st.sidebar.success(
+                f"Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
+            )
+
+
+# =====================================================
+# Clear knowledge base
 # =====================================================
 st.sidebar.divider()
 if st.sidebar.button("🗑️ Clear knowledge base"):
@@ -197,31 +226,32 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
     store.clear()
     st.cache_resource.clear()
     st.session_state.clear()
-
-    st.sidebar.success("Knowledge base cleared ✅")
+    st.sidebar.success("Cleared ✅")
     st.rerun()
 
 
 # =====================================================
-# Session State (CRITICAL FIX)
+# Session state
 # =====================================================
 st.session_state.setdefault("session_id", str(uuid4()))
 st.session_state.setdefault("messages", [])
 
 
 # =====================================================
-# Disable chat if DB empty
+# Disable chat when needed
 # =====================================================
-doc_count = get_vectorstore(collection_name)._collection.count()
-st.sidebar.caption(f"📄 Documents in DB: {doc_count}")
+if mode == "📄 Document Q&A (RAG)":
+    if get_vectorstore(collection_name)._collection.count() == 0:
+        st.info("Upload documents or a URL to start.")
+        st.stop()
 
-if doc_count == 0 and mode == "📄 Document Q&A (RAG)":
-    st.info("Upload documents or a URL to start.")
+if mode == "📊 Database Q&A (Text-to-SQL)" and not uploaded_tables:
+    st.info("Upload CSV or Excel files to start Database Q&A.")
     st.stop()
 
 
 # =====================================================
-# Display chat history (SINGLE SOURCE OF TRUTH)
+# Display history
 # =====================================================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -234,55 +264,36 @@ for msg in st.session_state.messages:
 user_input = st.chat_input("Ask a question")
 
 if user_input:
-    # -------------------------------
-    # 1️⃣ USER MESSAGE
-    # -------------------------------
     st.session_state.messages.append(
         {"role": "user", "content": user_input}
     )
-
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # -------------------------------
-    # 2️⃣ DATABASE MODE
-    # -------------------------------
+    # ================= TEXT-TO-SQL =================
     if mode == "📊 Database Q&A (Text-to-SQL)":
         with st.chat_message("assistant"):
-            with st.spinner("Generating SQL..."):
-                sql = generate_sql(user_input)
+            sql = generate_sql(user_input)
 
             if not is_safe_sql(sql):
                 answer = "I don't know based on the provided context."
                 st.markdown(answer)
             else:
-                st.markdown("**Generated SQL:**")
                 st.code(sql, language="sql")
-
-                try:
-                    rows, cols = run_sql(sql)
-                    df = pd.DataFrame(rows, columns=cols)
-
-                    st.markdown("**Query Result:**")
-                    st.dataframe(df, use_container_width=True)
-
-                    answer = "Here are the results based on your data."
-
-                except Exception as e:
-                    answer = f"Database error: {e}"
-                    st.error(answer)
+                rows, cols = run_sql(sql)
+                df = pd.DataFrame(rows, columns=cols)
+                st.dataframe(df, use_container_width=True)
+                answer = "Here are the results."
 
         st.session_state.messages.append(
             {"role": "assistant", "content": answer}
         )
 
-    # -------------------------------
-    # 3️⃣ RAG MODE (STRICT)
-    # -------------------------------
+    # ================= RAG =================
     else:
         raw_docs = retriever.invoke(user_input)
-
-        seen, docs = set(), []
+        docs = []
+        seen = set()
         for d in raw_docs:
             t = d.page_content.strip()
             if t and t not in seen:
@@ -295,7 +306,6 @@ if user_input:
             answer = "I don't know based on the provided context."
         else:
             context = format_docs(docs)
-
             if extract_person_names(user_input) - extract_person_names(context):
                 answer = "I don't know based on the provided context."
             else:
@@ -306,14 +316,6 @@ if user_input:
 
         with st.chat_message("assistant"):
             st.markdown(answer)
-
-            if docs:
-                with st.expander("🔍 Show retrieved context"):
-                    for i, d in enumerate(docs, 1):
-                        st.markdown(
-                            f"**Chunk {i}**\n\n{highlight_text(d.page_content, user_input)}",
-                            unsafe_allow_html=True,
-                        )
 
         st.session_state.messages.append(
             {"role": "assistant", "content": answer}
