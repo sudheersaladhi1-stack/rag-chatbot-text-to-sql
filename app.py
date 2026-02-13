@@ -78,7 +78,10 @@ st.caption("PDF / TXT / URL → Strict RAG (No Hallucination)")
 # =====================================================
 # Vectorstore
 # =====================================================
-embedding_model = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
+embedding_model = SentenceTransformerEmbeddings(
+    model_name="all-MiniLM-L6-v2"
+)
+
 
 
 def get_vectorstore(collection):
