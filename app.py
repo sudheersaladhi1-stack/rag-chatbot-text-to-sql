@@ -62,14 +62,17 @@ def load_url_as_documents(url: str):
         if line.strip()
     )
 
-    return [{
-        "page_content": text,
-        "metadata": {
-            "source": urlparse(url).netloc,
-            "type": "url",
-            "url": url
-        }
-    }]
+    from langchain_core.documents import Document
+    return [
+        Document(
+            page_content=text,
+            metadata={
+                "source": urlparse(url).netloc,
+                "type": "url",
+                "url": url
+            }
+        )
+    ]
 
 
 # =====================================================
@@ -122,7 +125,7 @@ retriever = load_retriever(collection_name)
 
 
 # =====================================================
-# Ingest Files
+# Ingest helper
 # =====================================================
 def ingest_documents(docs):
     splitter = RecursiveCharacterTextSplitter(
@@ -151,6 +154,9 @@ def ingest_documents(docs):
     )
 
 
+# =====================================================
+# Ingest Files
+# =====================================================
 if st.sidebar.button("📥 Ingest documents"):
     if not uploaded_files:
         st.sidebar.warning("Upload at least one file")
@@ -181,10 +187,8 @@ if st.sidebar.button("🌍 Ingest URL"):
         st.sidebar.warning("Enter a valid URL")
     else:
         with st.spinner("Fetching website..."):
-            url_docs = load_url_as_documents(url_input)
-            ingest_documents([
-                type("Doc", (), d) for d in url_docs
-            ])
+            docs = load_url_as_documents(url_input)
+            ingest_documents(docs)
 
         st.cache_resource.clear()
         st.sidebar.success("Website added ✅")
@@ -212,11 +216,8 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
 # =====================================================
 # Session state
 # =====================================================
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid4())
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+st.session_state.setdefault("session_id", str(uuid4()))
+st.session_state.setdefault("messages", [])
 
 
 # =====================================================
@@ -231,7 +232,7 @@ if doc_count == 0:
 
 
 # =====================================================
-# Display history
+# Display chat history
 # =====================================================
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
@@ -239,13 +240,17 @@ for m in st.session_state.messages:
 
 
 # =====================================================
-# Chat
+# Chat (🔥 FIXED)
 # =====================================================
 user_input = st.chat_input("Ask a question based on the uploaded knowledge")
 
 if user_input:
+    # 1️⃣ Save + render user message immediately
     st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
+    # Retrieve
     raw_docs = retriever.invoke(user_input)
 
     seen, retrieved = set(), []
@@ -258,20 +263,19 @@ if user_input:
             break
 
     if not retrieved:
-        st.chat_message("assistant").markdown(
-            "I don't know based on the provided context."
-        )
+        with st.chat_message("assistant"):
+            st.markdown("I don't know based on the provided context.")
         st.stop()
 
     context_text = format_docs(retrieved)
 
-    # 🚫 PERSON MISMATCH BLOCK
+    # 🚫 Person mismatch guard
     if extract_person_names(user_input) - extract_person_names(context_text):
-        st.chat_message("assistant").markdown(
-            "I don't know based on the provided context."
-        )
+        with st.chat_message("assistant"):
+            st.markdown("I don't know based on the provided context.")
         st.stop()
 
+    # Assistant
     with st.chat_message("assistant"):
         response = rag_chain_with_memory.invoke(
             {"input": user_input, "context": context_text},
