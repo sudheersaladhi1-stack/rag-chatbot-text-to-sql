@@ -3,6 +3,7 @@ from uuid import uuid4
 import os, re, hashlib, requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
+import pandas as pd
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -13,7 +14,7 @@ from langchain_core.documents import Document
 # RAG chain + memory store
 from src.rag_chat_memory import rag_chain_with_memory, store
 
-import pandas as pd
+# Text-to-SQL
 from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
 from src.text_to_sql.db import run_sql
@@ -77,7 +78,7 @@ def load_url_as_documents(url: str):
 # =====================================================
 st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
 st.title("🤖 RAG Chatbot")
-st.caption("PDF / TXT / URL → Strict RAG (No Hallucination)")
+st.caption("PDF / TXT / URL → Strict RAG | Database → Text-to-SQL")
 
 
 # =====================================================
@@ -102,6 +103,7 @@ def load_retriever(collection):
         search_type="similarity", search_kwargs={"k": 6}
     )
 
+
 # =====================================================
 # Sidebar
 # =====================================================
@@ -118,7 +120,6 @@ mode = st.sidebar.radio(
     "Chat Mode",
     ["📄 Document Q&A (RAG)", "📊 Database Q&A (Text-to-SQL)"]
 )
-
 
 st.sidebar.header("🌐 Add Website URL")
 url_input = st.sidebar.text_input("Enter website URL")
@@ -141,7 +142,8 @@ def ingest_documents(docs):
         src = c.metadata.get("source", "")
         c.metadata["collection"] = collection_name
         uid = make_id(c.page_content, src)
-        unique[uid] = c
+        if uid not in unique:
+            unique[uid] = c
 
     vs = get_vectorstore(collection_name)
     vs.add_documents(list(unique.values()), ids=list(unique.keys()))
@@ -194,15 +196,14 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
 
     store.clear()
     st.cache_resource.clear()
-    st.session_state["messages"] = []
-    st.session_state["session_id"] = str(uuid4())
+    st.session_state.clear()
 
     st.sidebar.success("Knowledge base cleared ✅")
     st.rerun()
 
 
 # =====================================================
-# Session State (FIXED)
+# Session State (CRITICAL FIX)
 # =====================================================
 st.session_state.setdefault("session_id", str(uuid4()))
 st.session_state.setdefault("messages", [])
@@ -214,13 +215,13 @@ st.session_state.setdefault("messages", [])
 doc_count = get_vectorstore(collection_name)._collection.count()
 st.sidebar.caption(f"📄 Documents in DB: {doc_count}")
 
-if doc_count == 0:
+if doc_count == 0 and mode == "📄 Document Q&A (RAG)":
     st.info("Upload documents or a URL to start.")
     st.stop()
 
 
 # =====================================================
-# Display chat history (SOURCE OF TRUTH)
+# Display chat history (SINGLE SOURCE OF TRUTH)
 # =====================================================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -234,7 +235,7 @@ user_input = st.chat_input("Ask a question")
 
 if user_input:
     # -------------------------------
-    # 1️⃣ USER MESSAGE (always show)
+    # 1️⃣ USER MESSAGE
     # -------------------------------
     st.session_state.messages.append(
         {"role": "user", "content": user_input}
@@ -244,14 +245,9 @@ if user_input:
         st.markdown(user_input)
 
     # -------------------------------
-    # 2️⃣ MODE SWITCH
+    # 2️⃣ DATABASE MODE
     # -------------------------------
     if mode == "📊 Database Q&A (Text-to-SQL)":
-        from src.text_to_sql.sql_chain import generate_sql
-        from src.text_to_sql.sql_guard import is_safe_sql
-        from src.text_to_sql.db import run_sql
-        import pandas as pd
-
         with st.chat_message("assistant"):
             with st.spinner("Generating SQL..."):
                 sql = generate_sql(user_input)
@@ -268,7 +264,7 @@ if user_input:
                     df = pd.DataFrame(rows, columns=cols)
 
                     st.markdown("**Query Result:**")
-                    st.dataframe(df)
+                    st.dataframe(df, use_container_width=True)
 
                     answer = "Here are the results based on your data."
 
@@ -300,17 +296,12 @@ if user_input:
         else:
             context = format_docs(docs)
 
-            # 🚫 PERSON NAME MISMATCH GUARD
             if extract_person_names(user_input) - extract_person_names(context):
                 answer = "I don't know based on the provided context."
             else:
                 answer = rag_chain_with_memory.invoke(
                     {"input": user_input, "context": context},
-                    config={
-                        "configurable": {
-                            "session_id": st.session_state.session_id
-                        }
-                    },
+                    config={"configurable": {"session_id": st.session_state.session_id}},
                 )
 
         with st.chat_message("assistant"):
