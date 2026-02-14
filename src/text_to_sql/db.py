@@ -17,7 +17,15 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_recycle=3600,
 )
+from sqlalchemy import inspect
 
+def get_schema():
+    inspector = inspect(engine)
+    schema = {}
+    for table_name in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        schema[table_name] = columns
+    return schema # Ensure this returns {} at minimum, never None
 
 def run_sql(sql: str):
     with engine.connect() as conn:

@@ -87,38 +87,31 @@ retriever = load_retriever(collection_name)
 def ingest_table(file):
     try:
         df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-        
-        # Normalize Names
         table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
         df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
 
-        metadata = MetaData()
+        # Add ID for Primary Key requirement
+        if 'id' not in df.columns:
+            df.insert(0, 'id', range(1, 1 + len(df)))
+
+        # Create table with explicit Primary Key to satisfy strict MySQL settings
+        df.to_sql(
+            table_name, 
+            engine, 
+            if_exists="replace", 
+            index=False, 
+            dtype={"id": Integer},
+            method="multi"
+        )
         
-        # 1. Define columns for the CREATE TABLE statement
-        columns = [Column('id', Integer, primary_key=True, autoincrement=True)]
-        
-        for col_name, dtype in df.dtypes.items():
-            if col_name == 'id': continue # Skip if already in CSV
-            if "int" in str(dtype).lower():
-                columns.append(Column(col_name, BigInteger))
-            elif "float" in str(dtype).lower():
-                columns.append(Column(col_name, Text)) # Simple fallback
-            else:
-                columns.append(Column(col_name, Text))
-
-        # 2. Drop and Recreate table with PRIMARY KEY constraint
-        new_table = Table(table_name, metadata, *columns)
-        metadata.drop_all(engine, tables=[new_table])
-        metadata.create_all(engine)
-
-        # 3. Insert data (Pandas will now append to the existing PK-enabled table)
-        df.to_sql(table_name, engine, if_exists="append", index=False, method="multi", chunksize=1000)
-
+        # Explicitly set PK
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id);"))
+            
         return table_name, df.shape
-
     except Exception as e:
-        st.error(f"❌ Database Ingestion Failed: {str(e)}")
-        return None, (0, 0)
+        st.error(f"Ingestion failed: {e}")
+        return None, (0,0)
 
 # =====================================================
 # Logic & Chat (Remaining App Code)
