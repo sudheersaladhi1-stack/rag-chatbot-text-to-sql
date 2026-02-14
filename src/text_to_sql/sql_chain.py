@@ -8,19 +8,21 @@ llm = ChatOpenAI(
 )
 
 def generate_sql(question: str) -> str:
+    # Now schema is a dictionary {}
     schema = get_schema()
 
-    # Guard against empty schema
     if not schema:
         return "-- Error: Database is empty. Please upload a CSV/Excel file first."
 
-    # Now .items() works because schema is a dictionary!
+    # Construct the schema text for the LLM
+    # schema.items() now works because schema is a dict!
     schema_text = "\n".join(
         f"Table {table}: {', '.join(cols)}"
         for table, cols in schema.items()
     )
 
     try:
+        # Invoke LLM
         response = llm.invoke(
             SQL_PROMPT.format(
                 schema=schema_text,
@@ -28,7 +30,7 @@ def generate_sql(question: str) -> str:
             )
         )
         
-        # Extract content from the AIMessage object
+        # Extract string content from AIMessage
         return response.content.strip()
     except Exception as e:
         return f"-- Error generating SQL: {str(e)}"

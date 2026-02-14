@@ -4,6 +4,8 @@ import os, re, hashlib, requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import pandas as pd
+from sqlalchemy import text, Integer
+import pandas as pd
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -84,35 +86,40 @@ retriever = load_retriever(collection_name)
 # =====================================================
 # THE FIX: Manual Table Ingestion
 # =====================================================
+
+
 def ingest_table(file):
     try:
+        # Load data
         df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+        
+        # Normalize names
         table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
         df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
 
-        # Add ID for Primary Key requirement
+        # 1. Add ID for Primary Key requirement
         if 'id' not in df.columns:
             df.insert(0, 'id', range(1, 1 + len(df)))
 
-        # Create table with explicit Primary Key to satisfy strict MySQL settings
+        # 2. Write to SQL
         df.to_sql(
             table_name, 
             engine, 
             if_exists="replace", 
             index=False, 
-            dtype={"id": Integer},
-            method="multi"
+            dtype={"id": Integer}, # Declare id as Integer
+            method="multi",
+            chunksize=1000
         )
         
-        # Explicitly set PK
+        # 3. Explicitly promote 'id' to PRIMARY KEY (Satisfies error 3750)
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id);"))
             
         return table_name, df.shape
     except Exception as e:
-        st.error(f"Ingestion failed: {e}")
+        st.error(f"❌ Ingestion failed: {e}")
         return None, (0,0)
-
 # =====================================================
 # Logic & Chat (Remaining App Code)
 # =====================================================

@@ -7,15 +7,15 @@ def get_schema():
         tables = inspector.get_table_names()
 
         if not tables:
-            return {} # Return empty dict instead of a string
+            return {} # Always return a dictionary, even if empty
 
-        schema = {}
+        schema_dict = {}
         for table in tables:
             cols = inspector.get_columns(table)
-            # Store columns as a list for easier processing later
-            schema[table] = [c["name"] for c in cols]
+            # Map table name to a list of column names
+            schema_dict[table] = [c["name"] for c in cols]
 
-        return schema
+        return schema_dict
     except Exception as e:
         print(f"Error fetching schema: {e}")
         return {}
