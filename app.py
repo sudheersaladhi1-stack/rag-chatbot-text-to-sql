@@ -91,7 +91,8 @@ retriever = load_retriever(collection_name)
 def ingest_table(file):
     try:
         # 1. Load and clean data
-        df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+        # Change this line in your ingest_table function:
+        df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file, engine='openpyxl')
         table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
         df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
 
