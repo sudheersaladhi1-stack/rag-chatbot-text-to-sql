@@ -3,11 +3,15 @@ from .db import engine
 
 def get_schema():
     inspector = inspect(engine)
-    schema = {}
+    tables = inspector.get_table_names()
 
-    for table in inspector.get_table_names():
-        schema[table] = [
-            col["name"] for col in inspector.get_columns(table)
-        ]
+    if not tables:
+        return "No tables available in the database."
 
-    return schema
+    schema = []
+    for table in tables:
+        cols = inspector.get_columns(table)
+        col_names = ", ".join(c["name"] for c in cols)
+        schema.append(f"Table {table}: {col_names}")
+
+    return "\n".join(schema)
