@@ -12,7 +12,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
-
+from sqlalchemy import Table, Column, Integer, Text, BigInteger, MetaData, text
 # RAG chain + memory store
 from src.rag_chat_memory import rag_chain_with_memory, store
 
@@ -90,35 +90,49 @@ retriever = load_retriever(collection_name)
 
 def ingest_table(file):
     try:
-        # Load data
+        # 1. Load and clean data
         df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-        
-        # Normalize names
         table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
         df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
 
-        # 1. Add ID for Primary Key requirement
-        if 'id' not in df.columns:
-            df.insert(0, 'id', range(1, 1 + len(df)))
+        # 2. Prepare Metadata and Define the Table Structure
+        metadata = MetaData()
+        
+        # We define the 'id' column as the Primary Key here
+        columns = [Column('id', Integer, primary_key=True, autoincrement=True)]
+        
+        # Add the rest of the columns from the dataframe
+        for col_name, dtype in df.dtypes.items():
+            if col_name == 'id': continue
+            if "int" in str(dtype).lower():
+                columns.append(Column(col_name, BigInteger))
+            else:
+                columns.append(Column(col_name, Text))
 
-        # 2. Write to SQL
+        # 3. Create the table manually in the database
+        # This sends the CORRECT 'CREATE TABLE' statement that MySQL requires
+        new_table = Table(table_name, metadata, *columns)
+        
+        with engine.begin() as conn:
+            # Drop if exists and create fresh with PK
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+            metadata.create_all(conn)
+
+        # 4. Insert the data
+        # We use 'if_exists="append"' so Pandas doesn't try to recreate the table
         df.to_sql(
             table_name, 
             engine, 
-            if_exists="replace", 
+            if_exists="append", 
             index=False, 
-            dtype={"id": Integer}, # Declare id as Integer
             method="multi",
             chunksize=1000
         )
-        
-        # 3. Explicitly promote 'id' to PRIMARY KEY (Satisfies error 3750)
-        with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id);"))
             
         return table_name, df.shape
+
     except Exception as e:
-        st.error(f"❌ Ingestion failed: {e}")
+        st.error(f"❌ Ingestion failed: {str(e)}")
         return None, (0,0)
 # =====================================================
 # Logic & Chat (Remaining App Code)
