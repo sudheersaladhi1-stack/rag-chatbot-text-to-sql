@@ -19,23 +19,16 @@ from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
 from src.text_to_sql.db import run_sql, engine
 
-# SQLAlchemy imports for the strict PK fix
-from sqlalchemy import Table, Column, Integer, String, BigInteger, MetaData, text
+# SQLAlchemy imports for schema definition
+from sqlalchemy import Table, Column, Integer, Text, BigInteger, MetaData, text
 
 # =====================================================
 # Utilities
 # =====================================================
 def highlight_text(text, query):
-    if not query:
-        return text
+    if not query: return text
     keywords = {w.lower() for w in re.findall(r"\w+", query) if len(w) > 2}
-    return re.sub(
-        r"\w+",
-        lambda m: f"<mark>{m.group(0)}</mark>"
-        if m.group(0).lower() in keywords
-        else m.group(0),
-        text,
-    )
+    return re.sub(r"\w+", lambda m: f"<mark>{m.group(0)}</mark>" if m.group(0).lower() in keywords else m.group(0), text)
 
 def format_docs(docs):
     return "\n\n".join(d.page_content for d in docs)
@@ -49,139 +42,88 @@ def extract_person_names(text):
 def load_url_as_documents(url):
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
     r.raise_for_status()
-
     soup = BeautifulSoup(r.text, "html.parser")
-    for t in soup(["script", "style", "nav", "footer", "header", "noscript"]):
-        t.decompose()
-
-    text = "\n".join(
-        line.strip()
-        for line in soup.get_text("\n").splitlines()
-        if line.strip()
-    )
-
-    return [
-        Document(
-            page_content=text,
-            metadata={"source": urlparse(url).netloc, "type": "url"},
-        )
-    ]
+    for t in soup(["script", "style", "nav", "footer", "header", "noscript"]): t.decompose()
+    text = "\n".join(line.strip() for line in soup.get_text("\n").splitlines() if line.strip())
+    return [Document(page_content=text, metadata={"source": urlparse(url).netloc, "type": "url"})]
 
 # =====================================================
-# Streamlit config
+# Streamlit setup
 # =====================================================
 st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
 st.title("🤖 RAG Chatbot")
 st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
 
-# =====================================================
-# Vectorstore
-# =====================================================
 embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
 def get_vectorstore(collection):
-    return Chroma(
-        collection_name=collection,
-        persist_directory="chroma_db",
-        embedding_function=embedding_model,
-    )
+    return Chroma(collection_name=collection, persist_directory="chroma_db", embedding_function=embedding_model)
 
 @st.cache_resource(show_spinner=False)
 def load_retriever(collection):
-    return get_vectorstore(collection).as_retriever(
-        search_type="similarity", search_kwargs={"k": 6}
-    )
+    return get_vectorstore(collection).as_retriever(search_type="similarity", search_kwargs={"k": 6})
 
 # =====================================================
 # Sidebar
 # =====================================================
 st.sidebar.header("🗂️ Collection")
 collection_name = st.sidebar.text_input("Collection name", "default")
-
 st.sidebar.divider()
-mode = st.sidebar.radio(
-    "Chat Mode",
-    ["📄 Document Q&A (RAG)", "📊 Database Q&A (Text-to-SQL)"]
-)
+mode = st.sidebar.radio("Chat Mode", ["📄 Document Q&A (RAG)", "📊 Database Q&A (Text-to-SQL)"])
 
 uploaded_files = None
 uploaded_tables = None
 
 if mode == "📄 Document Q&A (RAG)":
-    st.sidebar.header("📂 Upload Documents")
-    uploaded_files = st.sidebar.file_uploader(
-        "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
-    )
+    uploaded_files = st.sidebar.file_uploader("PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True)
 else:
-    st.sidebar.header("📊 Upload Data Files")
-    uploaded_tables = st.sidebar.file_uploader(
-        "CSV / Excel files", type=["csv", "xlsx"], accept_multiple_files=True
-    )
-
-st.sidebar.header("🌐 Add Website URL")
-url_input = st.sidebar.text_input("Enter website URL")
+    uploaded_tables = st.sidebar.file_uploader("CSV / Excel files", type=["csv", "xlsx"], accept_multiple_files=True)
 
 retriever = load_retriever(collection_name)
 
 # =====================================================
-# Ingest helpers
+# THE FIX: Manual Table Ingestion
 # =====================================================
-def ingest_documents(docs):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=150)
-    chunks = splitter.split_documents(docs)
-
-    def make_id(text, src):
-        return hashlib.md5(f"{collection_name}:{src}:{text}".encode()).hexdigest()
-
-    unique = {}
-    for c in chunks:
-        src = c.metadata.get("source", "")
-        c.metadata["collection"] = collection_name
-        uid = make_id(c.page_content, src)
-        unique[uid] = c
-
-    vs = get_vectorstore(collection_name)
-    vs.add_documents(list(unique.values()), ids=list(unique.keys()))
-
 def ingest_table(file):
     try:
         df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
         
-        # Clean names
+        # Normalize Names
         table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
         df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
 
-        # 1. Drop the table if it exists to start fresh
-        with engine.begin() as conn:
-            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+        metadata = MetaData()
+        
+        # 1. Define columns for the CREATE TABLE statement
+        columns = [Column('id', Integer, primary_key=True, autoincrement=True)]
+        
+        for col_name, dtype in df.dtypes.items():
+            if col_name == 'id': continue # Skip if already in CSV
+            if "int" in str(dtype).lower():
+                columns.append(Column(col_name, BigInteger))
+            elif "float" in str(dtype).lower():
+                columns.append(Column(col_name, Text)) # Simple fallback
+            else:
+                columns.append(Column(col_name, Text))
 
-        # 2. Add an auto-incrementing ID column to the DataFrame
-        if 'id' in df.columns:
-            df = df.drop(columns=['id'])
-        df.insert(0, 'id', range(1, 1 + len(df)))
+        # 2. Drop and Recreate table with PRIMARY KEY constraint
+        new_table = Table(table_name, metadata, *columns)
+        metadata.drop_all(engine, tables=[new_table])
+        metadata.create_all(engine)
 
-        # 3. Use to_sql with index=False, but specifying 'id' as the Primary Key via dtype
-        # For most MySQL versions, assigning a column as Integer + primary_key via SQLAlchemy
-        # during the to_sql call satisfies the requirement.
-        df.to_sql(
-            table_name,
-            engine,
-            if_exists="replace",
-            index=False,
-            dtype={"id": Integer},
-            method="multi",
-            chunksize=1000
-        )
-
-        # 4. Final safety check: Force the PK constraint if the server is still being strict
-        with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table_name} MODIFY COLUMN id INT AUTO_INCREMENT PRIMARY KEY;"))
+        # 3. Insert data (Pandas will now append to the existing PK-enabled table)
+        df.to_sql(table_name, engine, if_exists="append", index=False, method="multi", chunksize=1000)
 
         return table_name, df.shape
 
     except Exception as e:
         st.error(f"❌ Database Ingestion Failed: {str(e)}")
         return None, (0, 0)
+
+# =====================================================
+# Logic & Chat (Remaining App Code)
+# =====================================================
+# ... (Ingest actions, Session State, and Chat Logic from previous version) ...
 
 # =====================================================
 # Ingest actions
