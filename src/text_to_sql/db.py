@@ -1,27 +1,27 @@
-from dotenv import load_dotenv
-load_dotenv()
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
 
+load_dotenv()
+
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT", "3306")  # ✅ default
 DB_NAME = os.getenv("DB_NAME")
-
-if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
-    raise ValueError("❌ Database environment variables are not fully set")
+DB_SSL_CA = os.getenv("DB_SSL_CA")
 
 engine = create_engine(
-    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{int(DB_PORT)}/{DB_NAME}",
-    pool_pre_ping=True
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+    connect_args={
+        "ssl": {
+            "ca": DB_SSL_CA
+        }
+    },
+    pool_pre_ping=True,
 )
 
-def run_sql(query: str):
+def run_sql(sql: str):
     with engine.connect() as conn:
-        result = conn.execute(query)
-        rows = result.fetchall()
-        columns = result.keys()
-    return rows, columns
-
-
+        result = conn.execute(text(sql))
+        return result.fetchall(), result.keys()
