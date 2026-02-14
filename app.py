@@ -18,7 +18,7 @@ from src.rag_chat_memory import rag_chain_with_memory, store
 from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
 from src.text_to_sql.db import run_sql, engine
-
+from sqlalchemy import Integer, text  # Required for PK fix
 
 # =====================================================
 # Utilities
@@ -35,14 +35,11 @@ def highlight_text(text, query):
         text,
     )
 
-
 def format_docs(docs):
     return "\n\n".join(d.page_content for d in docs)
 
-
 def extract_person_names(text):
     return {w.lower() for w in re.findall(r"[A-Z][a-z]+", text)}
-
 
 # =====================================================
 # URL Loader
@@ -68,14 +65,12 @@ def load_url_as_documents(url):
         )
     ]
 
-
 # =====================================================
 # Streamlit config
 # =====================================================
 st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
 st.title("🤖 RAG Chatbot")
 st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
-
 
 # =====================================================
 # Vectorstore
@@ -84,7 +79,6 @@ embedding_model = SentenceTransformerEmbeddings(
     model_name="all-MiniLM-L6-v2"
 )
 
-
 def get_vectorstore(collection):
     return Chroma(
         collection_name=collection,
@@ -92,13 +86,11 @@ def get_vectorstore(collection):
         embedding_function=embedding_model,
     )
 
-
 @st.cache_resource(show_spinner=False)
 def load_retriever(collection):
     return get_vectorstore(collection).as_retriever(
         search_type="similarity", search_kwargs={"k": 6}
     )
-
 
 # =====================================================
 # Sidebar
@@ -123,7 +115,6 @@ if mode == "📄 Document Q&A (RAG)":
     uploaded_files = st.sidebar.file_uploader(
         "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
     )
-
 else:
     st.sidebar.header("📊 Upload Data Files")
     uploaded_tables = st.sidebar.file_uploader(
@@ -134,7 +125,6 @@ st.sidebar.header("🌐 Add Website URL")
 url_input = st.sidebar.text_input("Enter website URL")
 
 retriever = load_retriever(collection_name)
-
 
 # =====================================================
 # Ingest helpers
@@ -155,7 +145,6 @@ def ingest_documents(docs):
 
     vs = get_vectorstore(collection_name)
     vs.add_documents(list(unique.values()), ids=list(unique.keys()))
-
 
 def ingest_table(file):
     try:
@@ -179,29 +168,33 @@ def ingest_table(file):
             for c in df.columns
         ]
 
-        # Write safely to MySQL
+        # 1. Satisfy 'sql_require_primary_key' by adding an 'id' column
+        if 'id' not in df.columns:
+            df.insert(0, 'id', range(1, 1 + len(df)))
+
+        # 2. Write to SQL
         df.to_sql(
             table_name,
             engine,
             if_exists="replace",
-            index=True,
-            index_label="id",
+            index=False,
+            dtype={'id': Integer},
             method="multi",
             chunksize=1000
         )
+
+        # 3. Explicitly promote 'id' to Primary Key for modern MySQL clusters
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id);"))
+
         return table_name, df.shape
 
     except Exception as e:
-        # This will show the actual MySQL error in the Streamlit UI
         st.error(f"❌ Database Ingestion Failed: {str(e)}")
-        # Log the full error to the console as well
-        print(f"DEBUG ERROR: {e}")
         return None, (0, 0)
 
-
-
 # =====================================================
-# Ingest documents
+# Ingest actions
 # =====================================================
 if st.sidebar.button("📥 Ingest documents") and uploaded_files:
     docs = []
@@ -218,28 +211,20 @@ if st.sidebar.button("📥 Ingest documents") and uploaded_files:
     st.sidebar.success("Documents added ✅")
     st.rerun()
 
-
-# =====================================================
-# Ingest URL
-# =====================================================
 if st.sidebar.button("🌍 Ingest URL") and url_input:
     ingest_documents(load_url_as_documents(url_input))
     st.cache_resource.clear()
     st.sidebar.success("Website added ✅")
     st.rerun()
 
-
-# =====================================================
-# Ingest CSV / XLSX
-# =====================================================
 if mode == "📊 Database Q&A (Text-to-SQL)" and uploaded_tables:
     if st.sidebar.button("📥 Ingest Tables"):
         for f in uploaded_tables:
             table, shape = ingest_table(f)
-            st.sidebar.success(
-                f"Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
-            )
-
+            if table:
+                st.sidebar.success(
+                    f"Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
+                )
 
 # =====================================================
 # Clear knowledge base
@@ -257,13 +242,11 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
     st.sidebar.success("Cleared ✅")
     st.rerun()
 
-
 # =====================================================
 # Session state
 # =====================================================
 st.session_state.setdefault("session_id", str(uuid4()))
 st.session_state.setdefault("messages", [])
-
 
 # =====================================================
 # Disable chat when needed
@@ -277,14 +260,12 @@ if mode == "📊 Database Q&A (Text-to-SQL)" and not uploaded_tables:
     st.info("Upload CSV or Excel files to start Database Q&A.")
     st.stop()
 
-
 # =====================================================
 # Display history
 # =====================================================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-
 
 # =====================================================
 # Chat
@@ -308,10 +289,14 @@ if user_input:
                 st.markdown(answer)
             else:
                 st.code(sql, language="sql")
-                rows, cols = run_sql(sql)
-                df = pd.DataFrame(rows, columns=cols)
-                st.dataframe(df, use_container_width=True)
-                answer = "Here are the results."
+                try:
+                    rows, cols = run_sql(sql)
+                    df_res = pd.DataFrame(rows, columns=cols)
+                    st.dataframe(df_res, use_container_width=True)
+                    answer = "Here are the results."
+                except Exception as e:
+                    answer = f"Error running SQL: {e}"
+                    st.error(answer)
 
         st.session_state.messages.append(
             {"role": "assistant", "content": answer}

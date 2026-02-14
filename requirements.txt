@@ -13,3 +13,4 @@ sqlalchemy
 pymysql
 pandas
 langchain-openai
+cryptography
