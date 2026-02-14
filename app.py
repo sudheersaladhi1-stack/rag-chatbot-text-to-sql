@@ -184,7 +184,8 @@ def ingest_table(file):
             table_name,
             engine,
             if_exists="replace",
-            index=False,
+            index=True,
+            index_label="id",
             method="multi",
             chunksize=1000
         )
