@@ -158,37 +158,44 @@ def ingest_documents(docs):
 
 
 def ingest_table(file):
-    # Load data
-    df = (
-        pd.read_csv(file)
-        if file.name.endswith(".csv")
-        else pd.read_excel(file)
-    )
+    try:
+        # Load data
+        df = (
+            pd.read_csv(file)
+            if file.name.endswith(".csv")
+            else pd.read_excel(file)
+        )
 
-    # Normalize table name
-    table_name = re.sub(
-        r"[^a-zA-Z0-9_]",
-        "_",
-        os.path.splitext(file.name)[0].lower()
-    )
+        # Normalize table name
+        table_name = re.sub(
+            r"[^a-zA-Z0-9_]",
+            "_",
+            os.path.splitext(file.name)[0].lower()
+        )
 
-    # Normalize column names
-    df.columns = [
-        re.sub(r"[^a-zA-Z0-9_]", "_", c.lower())
-        for c in df.columns
-    ]
+        # Normalize column names
+        df.columns = [
+            re.sub(r"[^a-zA-Z0-9_]", "_", c.lower())
+            for c in df.columns
+        ]
 
-    # Write safely to MySQL
-    df.to_sql(
-        table_name,
-        engine,
-        if_exists="replace",
-        index=False,
-        method="multi",       # IMPORTANT
-        chunksize=1000        # IMPORTANT
-    )
+        # Write safely to MySQL
+        df.to_sql(
+            table_name,
+            engine,
+            if_exists="replace",
+            index=False,
+            method="multi",
+            chunksize=1000
+        )
+        return table_name, df.shape
 
-    return table_name, df.shape
+    except Exception as e:
+        # This will show the actual MySQL error in the Streamlit UI
+        st.error(f"❌ Database Ingestion Failed: {str(e)}")
+        # Log the full error to the console as well
+        print(f"DEBUG ERROR: {e}")
+        return None, (0, 0)
 
 
 
