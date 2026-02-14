@@ -158,20 +158,38 @@ def ingest_documents(docs):
 
 
 def ingest_table(file):
+    # Load data
     df = (
         pd.read_csv(file)
         if file.name.endswith(".csv")
         else pd.read_excel(file)
     )
 
-    table_name = (
-        os.path.splitext(file.name)[0]
-        .lower()
-        .replace(" ", "_")
+    # Normalize table name
+    table_name = re.sub(
+        r"[^a-zA-Z0-9_]",
+        "_",
+        os.path.splitext(file.name)[0].lower()
     )
 
-    df.to_sql(table_name, engine, if_exists="replace", index=False)
+    # Normalize column names
+    df.columns = [
+        re.sub(r"[^a-zA-Z0-9_]", "_", c.lower())
+        for c in df.columns
+    ]
+
+    # Write safely to MySQL
+    df.to_sql(
+        table_name,
+        engine,
+        if_exists="replace",
+        index=False,
+        method="multi",       # IMPORTANT
+        chunksize=1000        # IMPORTANT
+    )
+
     return table_name, df.shape
+
 
 
 # =====================================================

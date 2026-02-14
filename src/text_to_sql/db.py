@@ -11,10 +11,11 @@ engine = create_engine(
     f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
     connect_args={
         "ssl": {
-            "ca": "/etc/ssl/certs/ca-certificates.crt"
+            "ssl_mode": "REQUIRED"
         }
     },
     pool_pre_ping=True,
+    pool_recycle=3600,
 )
 
 
