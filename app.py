@@ -18,7 +18,9 @@ from src.rag_chat_memory import rag_chain_with_memory, store
 from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
 from src.text_to_sql.db import run_sql, engine
-from sqlalchemy import Integer, text  # Required for PK fix
+
+# SQLAlchemy imports for the strict PK fix
+from sqlalchemy import Table, Column, Integer, String, BigInteger, MetaData, text
 
 # =====================================================
 # Utilities
@@ -75,9 +77,7 @@ st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
 # =====================================================
 # Vectorstore
 # =====================================================
-embedding_model = SentenceTransformerEmbeddings(
-    model_name="all-MiniLM-L6-v2"
-)
+embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
 def get_vectorstore(collection):
     return Chroma(
@@ -104,9 +104,6 @@ mode = st.sidebar.radio(
     ["📄 Document Q&A (RAG)", "📊 Database Q&A (Text-to-SQL)"]
 )
 
-# =====================================================
-# MODE-AWARE UPLOADERS
-# =====================================================
 uploaded_files = None
 uploaded_tables = None
 
@@ -148,44 +145,37 @@ def ingest_documents(docs):
 
 def ingest_table(file):
     try:
-        # Load data
-        df = (
-            pd.read_csv(file)
-            if file.name.endswith(".csv")
-            else pd.read_excel(file)
-        )
+        df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
+        
+        # Clean names
+        table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
+        df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
 
-        # Normalize table name
-        table_name = re.sub(
-            r"[^a-zA-Z0-9_]",
-            "_",
-            os.path.splitext(file.name)[0].lower()
-        )
+        # 1. Drop the table if it exists to start fresh
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
-        # Normalize column names
-        df.columns = [
-            re.sub(r"[^a-zA-Z0-9_]", "_", c.lower())
-            for c in df.columns
-        ]
+        # 2. Add an auto-incrementing ID column to the DataFrame
+        if 'id' in df.columns:
+            df = df.drop(columns=['id'])
+        df.insert(0, 'id', range(1, 1 + len(df)))
 
-        # 1. Satisfy 'sql_require_primary_key' by adding an 'id' column
-        if 'id' not in df.columns:
-            df.insert(0, 'id', range(1, 1 + len(df)))
-
-        # 2. Write to SQL
+        # 3. Use to_sql with index=False, but specifying 'id' as the Primary Key via dtype
+        # For most MySQL versions, assigning a column as Integer + primary_key via SQLAlchemy
+        # during the to_sql call satisfies the requirement.
         df.to_sql(
             table_name,
             engine,
             if_exists="replace",
             index=False,
-            dtype={'id': Integer},
+            dtype={"id": Integer},
             method="multi",
             chunksize=1000
         )
 
-        # 3. Explicitly promote 'id' to Primary Key for modern MySQL clusters
+        # 4. Final safety check: Force the PK constraint if the server is still being strict
         with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id);"))
+            conn.execute(text(f"ALTER TABLE {table_name} MODIFY COLUMN id INT AUTO_INCREMENT PRIMARY KEY;"))
 
         return table_name, df.shape
 
@@ -222,35 +212,25 @@ if mode == "📊 Database Q&A (Text-to-SQL)" and uploaded_tables:
         for f in uploaded_tables:
             table, shape = ingest_table(f)
             if table:
-                st.sidebar.success(
-                    f"Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
-                )
+                st.sidebar.success(f"Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)")
 
 # =====================================================
-# Clear knowledge base
+# Session & Chat Logic
 # =====================================================
 st.sidebar.divider()
 if st.sidebar.button("🗑️ Clear knowledge base"):
     vs = get_vectorstore(collection_name)
     ids = vs._collection.get().get("ids", [])
-    if ids:
-        vs._collection.delete(ids=ids)
-
+    if ids: vs._collection.delete(ids=ids)
     store.clear()
     st.cache_resource.clear()
     st.session_state.clear()
     st.sidebar.success("Cleared ✅")
     st.rerun()
 
-# =====================================================
-# Session state
-# =====================================================
 st.session_state.setdefault("session_id", str(uuid4()))
 st.session_state.setdefault("messages", [])
 
-# =====================================================
-# Disable chat when needed
-# =====================================================
 if mode == "📄 Document Q&A (RAG)":
     if get_vectorstore(collection_name)._collection.count() == 0:
         st.info("Upload documents or a URL to start.")
@@ -260,30 +240,20 @@ if mode == "📊 Database Q&A (Text-to-SQL)" and not uploaded_tables:
     st.info("Upload CSV or Excel files to start Database Q&A.")
     st.stop()
 
-# =====================================================
-# Display history
-# =====================================================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# =====================================================
-# Chat
-# =====================================================
 user_input = st.chat_input("Ask a question")
 
 if user_input:
-    st.session_state.messages.append(
-        {"role": "user", "content": user_input}
-    )
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # ================= TEXT-TO-SQL =================
     if mode == "📊 Database Q&A (Text-to-SQL)":
         with st.chat_message("assistant"):
             sql = generate_sql(user_input)
-
             if not is_safe_sql(sql):
                 answer = "I don't know based on the provided context."
                 st.markdown(answer)
@@ -297,12 +267,8 @@ if user_input:
                 except Exception as e:
                     answer = f"Error running SQL: {e}"
                     st.error(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
 
-        st.session_state.messages.append(
-            {"role": "assistant", "content": answer}
-        )
-
-    # ================= RAG =================
     else:
         raw_docs = retriever.invoke(user_input)
         docs = []
@@ -310,10 +276,8 @@ if user_input:
         for d in raw_docs:
             t = d.page_content.strip()
             if t and t not in seen:
-                seen.add(t)
-                docs.append(d)
-            if len(docs) == 3:
-                break
+                seen.add(t); docs.append(d)
+            if len(docs) == 3: break
 
         if not docs:
             answer = "I don't know based on the provided context."
@@ -326,10 +290,6 @@ if user_input:
                     {"input": user_input, "context": context},
                     config={"configurable": {"session_id": st.session_state.session_id}},
                 )
-
         with st.chat_message("assistant"):
             st.markdown(answer)
-
-        st.session_state.messages.append(
-            {"role": "assistant", "content": answer}
-        )
+        st.session_state.messages.append({"role": "assistant", "content": answer})
