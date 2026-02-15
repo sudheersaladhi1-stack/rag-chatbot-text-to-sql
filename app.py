@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import pandas as pd
 from sqlalchemy import text, Integer
 import pandas as pd
+import plotly.express as px
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -220,6 +221,39 @@ if user_input:
                     rows, cols = run_sql(sql)
                     df_res = pd.DataFrame(rows, columns=cols)
                     st.dataframe(df_res, use_container_width=True)
+                    st.subheader("📊 Visualizations")
+
+                    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+                    categorical_cols = df.select_dtypes(exclude="number").columns.tolist()
+
+                    if numeric_cols:
+                        chart_type = st.selectbox(
+                            "Chart type",
+                            ["Bar", "Line", "Area", "Pie"]
+                        )
+
+                        x_col = st.selectbox(
+                            "X-axis",
+                            categorical_cols + numeric_cols
+                        )
+
+                        y_col = st.selectbox(
+                            "Y-axis",
+                            numeric_cols
+                        )
+
+                        if chart_type == "Bar":
+                            fig = px.bar(df, x=x_col, y=y_col)
+                        elif chart_type == "Line":
+                            fig = px.line(df, x=x_col, y=y_col)
+                        elif chart_type == "Area":
+                            fig = px.area(df, x=x_col, y=y_col)
+                        elif chart_type == "Pie":
+                            fig = px.pie(df, names=x_col, values=y_col)
+
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No numeric columns available for visualization.")
                     answer = "Here are the results."
                 except Exception as e:
                     answer = f"Error running SQL: {e}"
