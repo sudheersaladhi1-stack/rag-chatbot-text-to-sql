@@ -254,68 +254,68 @@ if user_input:
                     st.dataframe(df_res, use_container_width=True)
 
                     # =====================================================
-            # 📊 Visualization Panel (State-safe)
-            # =====================================================
-            if mode == "📊 Database Q&A (Text-to-SQL)" and "last_sql_df" in st.session_state:
+                    # 📊 Visualization Panel (State-safe)
+                    # =====================================================
+                    if mode == "📊 Database Q&A (Text-to-SQL)" and "last_sql_df" in st.session_state:
 
-                st.subheader("📊 Visualizations")
+                        st.subheader("📊 Visualizations")
 
-                df_vis = st.session_state["last_sql_df"].copy()
+                        df_vis = st.session_state["last_sql_df"].copy()
 
-                # Convert numeric columns safely
-                for c in df_vis.columns:
-                    df_vis[c] = pd.to_numeric(df_vis[c], errors="ignore")
+                        # Convert numeric columns safely
+                        for c in df_vis.columns:
+                            df_vis[c] = pd.to_numeric(df_vis[c], errors="ignore")
 
-                numeric_cols = df_vis.select_dtypes(include="number").columns.tolist()
-                categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
+                        numeric_cols = df_vis.select_dtypes(include="number").columns.tolist()
+                        categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
 
-                if not numeric_cols or not categorical_cols:
-                    st.info("Not enough numeric or categorical columns for visualization.")
-                    st.stop()
+                        if not numeric_cols or not categorical_cols:
+                            st.info("Not enough numeric or categorical columns for visualization.")
+                            st.stop()
 
-                chart_type = st.selectbox(
-                    "Chart type",
-                    ["Bar", "Line", "Area", "Pie"],
-                    key="chart_type"
-                )
-
-                x_col = st.selectbox(
-                    "Category (X-axis)",
-                    categorical_cols,
-                    key="x_col"
-                )
-
-                y_col = st.selectbox(
-                    "Metric (Y-axis)",
-                    numeric_cols,
-                    key="y_col"
-                )
-
-                try:
-                    if chart_type == "Bar":
-                        fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
-
-                    elif chart_type == "Line":
-                        fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
-
-                    elif chart_type == "Area":
-                        fig = px.area(df_vis, x=x_col, y=y_col)
-
-                    elif chart_type == "Pie":
-                        fig = px.pie(
-                            df_vis,
-                            names=x_col,
-                            values=y_col,
-                            hole=0.35
+                        chart_type = st.selectbox(
+                            "Chart type",
+                            ["Bar", "Line", "Area", "Pie"],
+                            key="chart_type"
                         )
 
-                    fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
-                    st.plotly_chart(fig, use_container_width=True)
+                        x_col = st.selectbox(
+                            "Category (X-axis)",
+                            categorical_cols,
+                            key="x_col"
+                        )
 
-                except Exception as e:
-                    st.error(f"Visualization error: {e}")
+                        y_col = st.selectbox(
+                            "Metric (Y-axis)",
+                            numeric_cols,
+                            key="y_col"
+                        )
 
-                    st.error(answer)
+                        try:
+                            if chart_type == "Bar":
+                                fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
+
+                            elif chart_type == "Line":
+                                fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
+
+                            elif chart_type == "Area":
+                                fig = px.area(df_vis, x=x_col, y=y_col)
+
+                            elif chart_type == "Pie":
+                                fig = px.pie(
+                                    df_vis,
+                                    names=x_col,
+                                    values=y_col,
+                                    hole=0.35
+                                )
+
+                            fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        except Exception as e:
+                            st.error(f"Visualization error: {e}")
+
+                            st.error(answer)
 
         st.session_state.messages.append(
             {"role": "assistant", "content": answer}
