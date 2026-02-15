@@ -317,6 +317,6 @@ if user_input:
 
                             st.error(answer)
 
-        st.session_state.messages.append(
+                            st.session_state.messages.append(
             {"role": "assistant", "content": answer}
         )
