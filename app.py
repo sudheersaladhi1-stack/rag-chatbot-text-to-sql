@@ -314,9 +314,79 @@ if user_input:
 
                         except Exception as e:
                             st.error(f"Visualization error: {e}")
+                        try:
+                            rows, cols = run_sql(sql)
+                            df_res = pd.DataFrame(rows, columns=cols)
 
+                            # 🔐 Persist SQL result
+                            st.session_state["last_sql_df"] = df_res
+                            st.session_state["last_sql"] = sql
+
+                            st.dataframe(df_res, use_container_width=True)
+
+                            # =====================================================
+                            # 📊 Visualization Panel
+                            # =====================================================
+                            st.subheader("📊 Visualizations")
+
+                            df_vis = df_res.copy()
+
+                            for c in df_vis.columns:
+                                df_vis[c] = pd.to_numeric(df_vis[c], errors="ignore")
+
+                            numeric_cols = df_vis.select_dtypes(include="number").columns.tolist()
+                            categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
+
+                            if numeric_cols and categorical_cols:
+
+                                chart_type = st.selectbox(
+                                    "Chart type",
+                                    ["Bar", "Line", "Area", "Pie"],
+                                )
+
+                                x_col = st.selectbox(
+                                    "Category (X-axis)",
+                                    categorical_cols,
+                                )
+
+                                y_col = st.selectbox(
+                                    "Metric (Y-axis)",
+                                    numeric_cols,
+                                )
+
+                                if chart_type == "Bar":
+                                    fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
+
+                                elif chart_type == "Line":
+                                    fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
+
+                                elif chart_type == "Area":
+                                    fig = px.area(df_vis, x=x_col, y=y_col)
+
+                                elif chart_type == "Pie":
+                                    fig = px.pie(
+                                        df_vis,
+                                        names=x_col,
+                                        values=y_col,
+                                        hole=0.35
+                                    )
+
+                                fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
+                                st.plotly_chart(fig, use_container_width=True)
+
+                            else:
+                                st.info("Not enough numeric and categorical columns for visualization.")
+
+                        except Exception as e:
+                            answer = f"SQL Execution Error: {e}"
                             st.error(answer)
 
                             st.session_state.messages.append(
-            {"role": "assistant", "content": answer}
-        )
+                                {"role": "assistant", "content": answer}
+                            )
+
+                                    st.error(answer)
+
+                                    st.session_state.messages.append(
+                    {"role": "assistant", "content": answer}
+                )
