@@ -53,7 +53,7 @@ def load_url_as_documents(url):
 # Streamlit setup
 # =====================================================
 st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
-st.title("🤖 RAG Chatbot")
+st.title("🤖 RAG Chatbot with Visual Analytics")
 st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
 
 embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
