@@ -220,44 +220,65 @@ if user_input:
                 try:
                     rows, cols = run_sql(sql)
                     df_res = pd.DataFrame(rows, columns=cols)
+                    
+# 🔐 Persist result across reruns
+                    st.session_state["last_sql_df"] = df_res
                     st.dataframe(df_res, use_container_width=True)
                     st.subheader("📊 Visualizations")
-                    # 🔧 FIX: Ensure numeric columns are detected
 
-                    for col in df_res.columns:
-                        df_res[col] = pd.to_numeric(df_res[col], errors="ignore")
+numeric_cols = df_vis.select_dtypes(include="number").columns.tolist()
+categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
+df_vis = df_vis.copy()
+for col in df_vis.columns:
+    df_vis[col] = pd.to_numeric(df_vis[col], errors="ignore")
 
-                    numeric_cols = df_res.select_dtypes(include="number").columns.tolist()
-                    categorical_cols = df_res.select_dtypes(exclude="number").columns.tolist()
+if not numeric_cols or not categorical_cols:
+    st.info("Not enough numeric or categorical columns for visualization.")
+    st.stop()
 
-                    if numeric_cols:
-                        chart_type = st.selectbox(
-                            "Chart type",
-                            ["Bar", "Line", "Area", "Pie"]
-                        )
+chart_type = st.selectbox(
+    "Chart type",
+    ["Bar", "Line", "Area", "Pie"],
+    key="chart_type"
+)
 
-                        x_col = st.selectbox(
-                            "X-axis",
-                            categorical_cols + numeric_cols
-                        )
+x_col = st.selectbox(
+    "Category (X-axis)",
+    categorical_cols,
+    key="x_col"
+)
 
-                        y_col = st.selectbox(
-                            "Y-axis",
-                            numeric_cols
-                        )
+y_col = st.selectbox(
+    "Metric (Y-axis)",
+    numeric_cols,
+    key="y_col"
+)
 
-                        if chart_type == "Bar":
-                            fig = px.bar(df_res, x=x_col, y=y_col)
-                        elif chart_type == "Line":
-                            fig = px.line(df_res, x=x_col, y=y_col)
-                        elif chart_type == "Area":
-                            fig = px.area(df_res, x=x_col, y=y_col)
-                        elif chart_type == "Pie":
-                            fig = px.pie(df_res, names=x_col, values=y_col)
+# 🔒 Chart rendering (no silent failures)
+try:
+    if chart_type == "Bar":
+        fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
 
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No numeric columns available for visualization.")
+    elif chart_type == "Line":
+        fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
+
+    elif chart_type == "Area":
+        fig = px.area(df_vis, x=x_col, y=y_col)
+
+    elif chart_type == "Pie":
+        fig = px.pie(
+            df_vis,
+            names=x_col,
+            values=y_col,
+            hole=0.3
+        )
+
+    fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+except Exception as e:
+    st.error(f"Visualization error: {e}")
+
                     answer = "Here are the results."
                 except Exception as e:
                     answer = f"Error running SQL: {e}"
