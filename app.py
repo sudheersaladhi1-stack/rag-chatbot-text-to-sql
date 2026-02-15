@@ -222,6 +222,10 @@ if user_input:
                     df_res = pd.DataFrame(rows, columns=cols)
                     st.dataframe(df_res, use_container_width=True)
                     st.subheader("📊 Visualizations")
+                    # 🔧 FIX: Ensure numeric columns are detected
+
+                    for col in df_res.columns:
+                        df_res[col] = pd.to_numeric(df_res[col], errors="ignore")
 
                     numeric_cols = df_res.select_dtypes(include="number").columns.tolist()
                     categorical_cols = df_res.select_dtypes(exclude="number").columns.tolist()
