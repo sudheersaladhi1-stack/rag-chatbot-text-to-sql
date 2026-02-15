@@ -223,8 +223,8 @@ if user_input:
                     st.dataframe(df_res, use_container_width=True)
                     st.subheader("📊 Visualizations")
 
-                    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-                    categorical_cols = df.select_dtypes(exclude="number").columns.tolist()
+                    numeric_cols = df_res.select_dtypes(include="number").columns.tolist()
+                    categorical_cols = df_res.select_dtypes(exclude="number").columns.tolist()
 
                     if numeric_cols:
                         chart_type = st.selectbox(
@@ -243,13 +243,13 @@ if user_input:
                         )
 
                         if chart_type == "Bar":
-                            fig = px.bar(df, x=x_col, y=y_col)
+                            fig = px.bar(df_res, x=x_col, y=y_col)
                         elif chart_type == "Line":
-                            fig = px.line(df, x=x_col, y=y_col)
+                            fig = px.line(df_res, x=x_col, y=y_col)
                         elif chart_type == "Area":
-                            fig = px.area(df, x=x_col, y=y_col)
+                            fig = px.area(df_res, x=x_col, y=y_col)
                         elif chart_type == "Pie":
-                            fig = px.pie(df, names=x_col, values=y_col)
+                            fig = px.pie(df_res, names=x_col, values=y_col)
 
                         st.plotly_chart(fig, use_container_width=True)
                     else:
