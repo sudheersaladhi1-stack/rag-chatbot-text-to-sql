@@ -237,116 +237,95 @@ if user_input:
             sql = generate_sql(user_input)
 
             if not is_safe_sql(sql):
-                st.markdown("I don't know based on the provided context.")
+                answer = "I don't know based on the provided context."
+                st.markdown(answer)
+
             else:
                 st.code(sql, language="sql")
 
-                rows, cols = run_sql(sql)
-                df_res = pd.DataFrame(rows, columns=cols)
+                try:
+                    rows, cols = run_sql(sql)
+                    df_res = pd.DataFrame(rows, columns=cols)
 
-                # 🔐 Persist SQL result
-                st.session_state["last_sql_df"] = df_res
+                    # 🔐 Persist SQL result
+                    st.session_state["last_sql_df"] = df_res
 
-                st.dataframe(df_res, use_container_width=True)
+                    st.dataframe(df_res, use_container_width=True)
 
-                # ================= VISUALS =================
-                st.subheader("📊 Visualizations")
+                    # ================= VISUALIZATIONS =================
+                    st.subheader("📊 Visualizations")
 
-                df_vis = st.session_state["last_sql_df"].copy()
-                for c in df_vis.columns:
-                    df_vis[c] = pd.to_numeric(
-                        df_vis[c], errors="ignore"
-                    )
+                    df_vis = st.session_state["last_sql_df"].copy()
 
-                numeric_cols = df_vis.select_dtypes(
-                    include="number"
-                ).columns.tolist()
-                categorical_cols = df_vis.select_dtypes(
-                    exclude="number"
-                ).columns.tolist()
+                    # Ensure numeric conversion
+                    for col in df_vis.columns:
+                        df_vis[col] = pd.to_numeric(df_vis[col], errors="ignore")
 
-                if numeric_cols and categorical_cols:
-                    chart_type = st.selectbox(
-                        "Chart type",
-                        ["Bar", "Line", "Area", "Pie"],
-                        key="chart_type",
-                    )
+                    numeric_cols = df_vis.select_dtypes(
+                        include="number"
+                    ).columns.tolist()
 
-                    x_col = st.selectbox(
-                        "Category",
-                        categorical_cols,
-                        key="x_col",
-                    )
+                    categorical_cols = df_vis.select_dtypes(
+                        exclude="number"
+                    ).columns.tolist()
 
-                    y_col = st.selectbox(
-                        "Metric",
-                        numeric_cols,
-                        key="y_col",
-                    )
-
-                    if chart_type == "Bar":
-                        fig = px.bar(
-                            df_vis, x=x_col, y=y_col, text=y_col
-                        )
-                    elif chart_type == "Line":
-                        fig = px.line(
-                            df_vis,
-                            x=x_col,
-                            y=y_col,
-                            markers=True,
-                        )
-                    elif chart_type == "Area":
-                        fig = px.area(
-                            df_vis, x=x_col, y=y_col
+                    if not numeric_cols or not categorical_cols:
+                        st.info(
+                            "Not enough numeric or categorical columns for visualization."
                         )
                     else:
-                        fig = px.pie(
-                            df_vis,
-                            names=x_col,
-                            values=y_col,
-                            hole=0.3,
+                        chart_type = st.selectbox(
+                            "Chart type",
+                            ["Bar", "Line", "Area", "Pie"],
+                            key="chart_type"
                         )
 
-                    st.plotly_chart(
-                        fig, use_container_width=True
-                    )
-                else:
-                    st.info(
-                        "Not enough numeric or categorical columns for visualization."
-                    )
+                        x_col = st.selectbox(
+                            "Category (X-axis)",
+                            categorical_cols,
+                            key="x_col"
+                        )
 
-    # ================= RAG =================
-    else:
-        raw_docs = retriever.invoke(user_input)
-        docs = []
-        seen = set()
+                        y_col = st.selectbox(
+                            "Metric (Y-axis)",
+                            numeric_cols,
+                            key="y_col"
+                        )
 
-        for d in raw_docs:
-            t = d.page_content.strip()
-            if t and t not in seen:
-                seen.add(t)
-                docs.append(d)
-            if len(docs) == 3:
-                break
+                        if chart_type == "Bar":
+                            fig = px.bar(
+                                df_vis, x=x_col, y=y_col, text=y_col
+                            )
 
-        if not docs:
-            answer = "I don't know based on the provided context."
-        else:
-            context = format_docs(docs)
-            if extract_person_names(user_input) - extract_person_names(context):
-                answer = "I don't know based on the provided context."
-            else:
-                answer = rag_chain_with_memory.invoke(
-                    {"input": user_input, "context": context},
-                    config={
-                        "configurable": {
-                            "session_id": st.session_state.session_id
-                        }
-                    },
-                )
+                        elif chart_type == "Line":
+                            fig = px.line(
+                                df_vis, x=x_col, y=y_col, markers=True
+                            )
 
-        with st.chat_message("assistant"):
-            st.markdown(answer)
+                        elif chart_type == "Area":
+                            fig = px.area(
+                                df_vis, x=x_col, y=y_col
+                            )
+
+                        elif chart_type == "Pie":
+                            fig = px.pie(
+                                df_vis,
+                                names=x_col,
+                                values=y_col,
+                                hole=0.35
+                            )
+
+                        fig.update_layout(
+                            margin=dict(t=40, l=20, r=20, b=20)
+                        )
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    answer = "Here are the results."
+
+                except Exception as e:
+                    answer = f"❌ Error running SQL: {e}"
+                    st.error(answer)
 
         st.session_state.messages.append(
             {"role": "assistant", "content": answer}
