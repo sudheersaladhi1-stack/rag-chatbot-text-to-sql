@@ -24,6 +24,8 @@ from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
 from src.text_to_sql.db import run_sql, engine
 
+CHROMA_DIR = "chroma_db"
+
 # =====================================================
 # Utilities
 # =====================================================
@@ -60,17 +62,20 @@ st.title("🤖 RAG Chatbot with Visual Analytics")
 st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
 
 # =====================================================
-# Vector Store
+# ✅ Fixed: Cache embedding model — prevents recreation on every rerun
 # =====================================================
-embedding_model = SentenceTransformerEmbeddings(
-    model_name="all-MiniLM-L6-v2"
-)
+@st.cache_resource(show_spinner=False)
+def get_embedding_model():
+    return SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
+# =====================================================
+# ✅ Fixed: Cache vectorstore retriever per collection
+# =====================================================
 def get_vectorstore(collection):
     return Chroma(
         collection_name=collection,
-        persist_directory="chroma_db",
-        embedding_function=embedding_model,
+        persist_directory=CHROMA_DIR,
+        embedding_function=get_embedding_model(),
     )
 
 @st.cache_resource(show_spinner=False)
@@ -94,9 +99,26 @@ uploaded_files = None
 uploaded_tables = None
 
 if mode == "📄 Document Q&A (RAG)":
+    st.sidebar.subheader("📁 Upload Files")
     uploaded_files = st.sidebar.file_uploader(
         "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
     )
+
+    # ✅ Fixed: URL ingestion UI was coded but never shown — now wired to sidebar
+    st.sidebar.subheader("🌐 Add Website URL")
+    url_input = st.sidebar.text_input("Enter website URL", placeholder="https://example.com")
+
+    if st.sidebar.button("🔗 Ingest URL") and url_input:
+        with st.sidebar:
+            with st.spinner("Fetching URL..."):
+                try:
+                    docs = load_url_as_documents(url_input)
+                    ingest_documents_fn = lambda d: None  # defined below, called after
+                    st.session_state["_pending_url_docs"] = docs
+                    st.sidebar.success(f"URL fetched ✅ — click 'Ingest documents' to save.")
+                except Exception as e:
+                    st.sidebar.error(f"Failed to fetch URL: {e}")
+
 else:
     uploaded_tables = st.sidebar.file_uploader(
         "CSV / Excel files", type=["csv", "xlsx"], accept_multiple_files=True
@@ -113,9 +135,9 @@ def ingest_documents(docs):
     )
     chunks = splitter.split_documents(docs)
 
-    def make_id(text, src):
+    def make_id(chunk_text, src):
         return hashlib.md5(
-            f"{collection_name}:{src}:{text}".encode()
+            f"{collection_name}:{src}:{chunk_text}".encode()
         ).hexdigest()
 
     unique = {}
@@ -126,6 +148,7 @@ def ingest_documents(docs):
 
     vs = get_vectorstore(collection_name)
     vs.add_documents(list(unique.values()), ids=list(unique.keys()))
+    return len(unique)
 
 # =====================================================
 # Ingest Tables (PK-safe for MySQL)
@@ -178,31 +201,73 @@ def ingest_table(file):
 # =====================================================
 # Sidebar Actions
 # =====================================================
-if st.sidebar.button("📥 Ingest documents") and uploaded_files:
+if st.sidebar.button("📥 Ingest documents"):
     docs = []
-    for f in uploaded_files:
-        tmp = f"tmp_{f.name}"
-        with open(tmp, "wb") as t:
-            t.write(f.read())
-        loader = (
-            PyPDFLoader(tmp)
-            if f.name.endswith(".pdf")
-            else TextLoader(tmp)
-        )
-        docs.extend(loader.load())
-        os.remove(tmp)
 
-    ingest_documents(docs)
-    st.sidebar.success("Documents added ✅")
-    st.rerun()
+    # Ingest uploaded files
+    if uploaded_files:
+        for f in uploaded_files:
+            tmp = f"tmp_{f.name}"
+            with open(tmp, "wb") as t:
+                t.write(f.read())
+            try:
+                loader = (
+                    PyPDFLoader(tmp)
+                    if f.name.endswith(".pdf")
+                    else TextLoader(tmp, encoding="utf-8")
+                )
+                docs.extend(loader.load())
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ Could not load {f.name}: {e}")
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+
+    # ✅ Also ingest any pending URL docs
+    if "_pending_url_docs" in st.session_state:
+        docs.extend(st.session_state.pop("_pending_url_docs"))
+
+    if docs:
+        with st.spinner("Ingesting documents..."):
+            count = ingest_documents(docs)
+        st.sidebar.success(f"✅ {count} chunks added to '{collection_name}'")
+        st.rerun()
+    else:
+        st.sidebar.warning("⚠️ No documents or URLs to ingest.")
 
 if mode == "📊 Database Q&A (Text-to-SQL)" and uploaded_tables:
     if st.sidebar.button("📥 Ingest Tables"):
         for f in uploaded_tables:
-            table, shape = ingest_table(f)
-            st.sidebar.success(
-                f"Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
-            )
+            try:
+                table, shape = ingest_table(f)
+                st.sidebar.success(
+                    f"✅ Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
+                )
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to load {f.name}: {e}")
+
+# =====================================================
+# Clear Knowledge Base
+# =====================================================
+if st.sidebar.button("🗑️ Clear knowledge base"):
+    try:
+        vs = get_vectorstore(collection_name)
+        ids = vs._collection.get().get("ids", [])
+        if ids:
+            vs._collection.delete(ids=ids)
+            st.sidebar.success(f"✅ Cleared {len(ids)} chunks from '{collection_name}'")
+        else:
+            st.sidebar.info("Collection is already empty.")
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"❌ Error clearing knowledge base: {e}")
+
+# Show document count
+try:
+    doc_count = get_vectorstore(collection_name)._collection.count()
+    st.sidebar.caption(f"📚 Documents in DB: {doc_count}")
+except Exception:
+    st.sidebar.caption("📚 Documents in DB: —")
 
 # =====================================================
 # Session State
@@ -221,12 +286,10 @@ for msg in st.session_state.messages:
 # =====================================================
 # Chat Input
 # =====================================================
-user_input = st.chat_input("Ask a question")
+user_input = st.chat_input("Ask a question based on the uploaded knowledge")
 
 if user_input:
-    st.session_state.messages.append(
-        {"role": "user", "content": user_input}
-    )
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -237,8 +300,9 @@ if user_input:
             sql = generate_sql(user_input)
 
             if not is_safe_sql(sql):
-                answer = "I don't know based on the provided context."
-                st.markdown(answer)
+                answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
+                st.warning(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
 
             else:
                 st.code(sql, language="sql")
@@ -247,11 +311,16 @@ if user_input:
                     rows, cols = run_sql(sql)
                     df_res = pd.DataFrame(rows, columns=cols)
 
-                    # Persist SQL result
                     st.session_state["last_sql_df"] = df_res
                     st.session_state["last_sql"] = sql
 
                     st.dataframe(df_res, use_container_width=True)
+
+                    # ✅ Fixed: Save successful SQL answer to chat history
+                    answer_summary = f"Query executed successfully. {len(df_res)} rows returned."
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": f"```sql\n{sql}\n```\n\n{answer_summary}"}
+                    )
 
                     # =====================================================
                     # 📊 Visualization Panel
@@ -259,7 +328,6 @@ if user_input:
                     st.subheader("📊 Visualizations")
 
                     df_vis = df_res.copy()
-
                     for c in df_vis.columns:
                         df_vis[c] = pd.to_numeric(df_vis[c], errors="ignore")
 
@@ -267,49 +335,57 @@ if user_input:
                     categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
 
                     if numeric_cols and categorical_cols:
-
-                        chart_type = st.selectbox(
-                            "Chart type",
-                            ["Bar", "Line", "Area", "Pie"],
-                        )
-
-                        x_col = st.selectbox(
-                            "Category (X-axis)",
-                            categorical_cols,
-                        )
-
-                        y_col = st.selectbox(
-                            "Metric (Y-axis)",
-                            numeric_cols,
-                        )
+                        chart_type = st.selectbox("Chart type", ["Bar", "Line", "Area", "Pie"])
+                        x_col = st.selectbox("Category (X-axis)", categorical_cols)
+                        y_col = st.selectbox("Metric (Y-axis)", numeric_cols)
 
                         if chart_type == "Bar":
                             fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
-
                         elif chart_type == "Line":
                             fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
-
                         elif chart_type == "Area":
                             fig = px.area(df_vis, x=x_col, y=y_col)
-
                         elif chart_type == "Pie":
-                            fig = px.pie(
-                                df_vis,
-                                names=x_col,
-                                values=y_col,
-                                hole=0.35
-                            )
+                            fig = px.pie(df_vis, names=x_col, values=y_col, hole=0.35)
 
                         fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
                         st.plotly_chart(fig, use_container_width=True)
 
                     else:
-                        st.info("Not enough numeric and categorical columns for visualization.")
+                        st.info("ℹ️ Not enough numeric and categorical columns for visualization.")
 
                 except Exception as e:
-                    answer = f"SQL Execution Error: {e}"
+                    answer = f"❌ SQL Execution Error: {e}"
                     st.error(answer)
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
 
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer}
-                    )
+    # ================= RAG Q&A =================
+    else:
+        with st.chat_message("assistant"):
+            try:
+                retrieved_docs = retriever.invoke(user_input)
+                context = format_docs(retrieved_docs)
+
+                if not context.strip():
+                    answer = "I don't know based on the provided context."
+                    st.markdown(answer)
+                else:
+                    with st.spinner("Thinking..."):
+                        answer = rag_chain_with_memory.invoke(
+                            {"input": user_input, "context": context},
+                            config={"configurable": {"session_id": st.session_state["session_id"]}},
+                        )
+                    st.markdown(answer)
+
+                    # Show sources
+                    sources = list({
+                        d.metadata.get("source", "Unknown") for d in retrieved_docs
+                    })
+                    if sources:
+                        st.caption(f"📎 Sources: {', '.join(sources)}")
+
+            except Exception as e:
+                answer = f"❌ Error: {e}"
+                st.error(answer)
+
+            st.session_state.messages.append({"role": "assistant", "content": answer})

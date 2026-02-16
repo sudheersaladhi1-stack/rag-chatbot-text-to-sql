@@ -1,5 +1,5 @@
 from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI  # ✅ Fixed: was langchain_community (deprecated)
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -25,16 +25,14 @@ qa_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            """
-You MUST answer strictly and only from the provided Context.
+            """You MUST answer strictly and only from the provided Context.
 
 Rules:
 - Use ONLY information explicitly present in Context.
 - DO NOT use prior chat history, world knowledge, or assumptions.
 - DO NOT infer or guess missing information.
-- If the answer is NOT explicitly stated in Context, reply EXACTLY:"I don't know based on the provided context.
-- "You MUST answer strictly and only from the provided Context."
-"
+- If the answer is NOT explicitly stated in Context, reply EXACTLY:
+  "I don't know based on the provided context."
 
 Context:
 {context}
@@ -45,7 +43,7 @@ Context:
 )
 
 # =====================================================
-# RAG CHAIN (NO RETRIEVAL INSIDE)
+# RAG CHAIN (NO RETRIEVAL INSIDE — retrieval done in app.py)
 # =====================================================
 rag_chain = (
     qa_prompt
@@ -54,7 +52,7 @@ rag_chain = (
 )
 
 # =====================================================
-# CHAT MEMORY (SAFE – DOES NOT AFFECT FACTS)
+# CHAT MEMORY (SAFE — DOES NOT AFFECT FACTS)
 # =====================================================
 store = {}
 
