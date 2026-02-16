@@ -32,8 +32,23 @@ CHROMA_DIR = "chroma_db"
 def format_docs(docs):
     return "\n\n".join(d.page_content for d in docs)
 
-def extract_person_names(text):
-    return {w.lower() for w in re.findall(r"[A-Z][a-z]+", text)}
+def extract_person_names(t):
+    return {w.lower() for w in re.findall(r"[A-Z][a-z]+", t)}
+
+# =====================================================
+# Fix 3: Highlight matching keywords in chunk text
+# =====================================================
+def highlight_keywords(chunk_text: str, query: str) -> str:
+    keywords = [w for w in re.split(r"\W+", query) if len(w) > 2]
+    highlighted = chunk_text
+    for kw in keywords:
+        highlighted = re.sub(
+            f"({re.escape(kw)})",
+            r"<mark style='background-color:#fff176;padding:0 2px;border-radius:3px;'>\1</mark>",
+            highlighted,
+            flags=re.IGNORECASE,
+        )
+    return highlighted
 
 # =====================================================
 # URL Loader
@@ -44,12 +59,12 @@ def load_url_as_documents(url):
     soup = BeautifulSoup(r.text, "html.parser")
     for t in soup(["script", "style", "nav", "footer", "header", "noscript"]):
         t.decompose()
-    text = "\n".join(
+    page_text = "\n".join(
         line.strip() for line in soup.get_text("\n").splitlines() if line.strip()
     )
     return [
         Document(
-            page_content=text,
+            page_content=page_text,
             metadata={"source": urlparse(url).netloc, "type": "url"},
         )
     ]
@@ -62,14 +77,14 @@ st.title("🤖 RAG Chatbot with Visual Analytics")
 st.caption("PDF / TXT / URL → Strict RAG | CSV / XLSX → Text-to-SQL")
 
 # =====================================================
-# ✅ Fixed: Cache embedding model — prevents recreation on every rerun
+# Cache embedding model
 # =====================================================
 @st.cache_resource(show_spinner=False)
 def get_embedding_model():
     return SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
 # =====================================================
-# ✅ Fixed: Cache vectorstore retriever per collection
+# Vectorstore helpers
 # =====================================================
 def get_vectorstore(collection):
     return Chroma(
@@ -83,6 +98,54 @@ def load_retriever(collection):
     return get_vectorstore(collection).as_retriever(
         search_type="similarity", search_kwargs={"k": 6}
     )
+
+# =====================================================
+# Core ingest function — used by both file and URL ingestion
+# =====================================================
+def ingest_documents_direct(docs, col_name):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=150)
+    chunks = splitter.split_documents(docs)
+
+    def make_id(chunk_text, src):
+        return hashlib.md5(f"{col_name}:{src}:{chunk_text}".encode()).hexdigest()
+
+    unique = {}
+    for c in chunks:
+        src = c.metadata.get("source", "")
+        uid = make_id(c.page_content, src)
+        unique[uid] = c
+
+    vs = get_vectorstore(col_name)
+    vs.add_documents(list(unique.values()), ids=list(unique.keys()))
+    return len(unique)
+
+# =====================================================
+# Ingest Tables (PK-safe for MySQL)
+# =====================================================
+def ingest_table(file):
+    df = (
+        pd.read_csv(file)
+        if file.name.endswith(".csv")
+        else pd.read_excel(file, engine="openpyxl")
+    )
+    table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.name)[0].lower())
+    df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", c.lower()) for c in df.columns]
+
+    metadata = MetaData()
+    columns = [Column("id", Integer, primary_key=True, autoincrement=True)]
+    for col, dtype in df.dtypes.items():
+        if "int" in str(dtype):
+            columns.append(Column(col, BigInteger))
+        else:
+            columns.append(Column(col, Text))
+
+    table = Table(table_name, metadata, *columns)
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+        metadata.create_all(conn)
+
+    df.to_sql(table_name, engine, if_exists="append", index=False, method="multi", chunksize=1000)
+    return table_name, df.shape
 
 # =====================================================
 # Sidebar
@@ -104,20 +167,19 @@ if mode == "📄 Document Q&A (RAG)":
         "PDF / TXT files", type=["pdf", "txt"], accept_multiple_files=True
     )
 
-    # ✅ Fixed: URL ingestion UI was coded but never shown — now wired to sidebar
     st.sidebar.subheader("🌐 Add Website URL")
     url_input = st.sidebar.text_input("Enter website URL", placeholder="https://example.com")
 
+    # Fix 2: Ingest URL directly and immediately — no pending state
     if st.sidebar.button("🔗 Ingest URL") and url_input:
-        with st.sidebar:
-            with st.spinner("Fetching URL..."):
-                try:
-                    docs = load_url_as_documents(url_input)
-                    ingest_documents_fn = lambda d: None  # defined below, called after
-                    st.session_state["_pending_url_docs"] = docs
-                    st.sidebar.success(f"URL fetched ✅ — click 'Ingest documents' to save.")
-                except Exception as e:
-                    st.sidebar.error(f"Failed to fetch URL: {e}")
+        with st.spinner("Fetching and ingesting URL..."):
+            try:
+                url_docs = load_url_as_documents(url_input)
+                count = ingest_documents_direct(url_docs, collection_name)
+                st.sidebar.success(f"✅ URL ingested — {count} chunks saved to '{collection_name}'")
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to ingest URL: {e}")
 
 else:
     uploaded_tables = st.sidebar.file_uploader(
@@ -126,85 +188,9 @@ else:
 
 retriever = load_retriever(collection_name)
 
-# =====================================================
-# Ingest Documents
-# =====================================================
-def ingest_documents(docs):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=600, chunk_overlap=150
-    )
-    chunks = splitter.split_documents(docs)
-
-    def make_id(chunk_text, src):
-        return hashlib.md5(
-            f"{collection_name}:{src}:{chunk_text}".encode()
-        ).hexdigest()
-
-    unique = {}
-    for c in chunks:
-        src = c.metadata.get("source", "")
-        uid = make_id(c.page_content, src)
-        unique[uid] = c
-
-    vs = get_vectorstore(collection_name)
-    vs.add_documents(list(unique.values()), ids=list(unique.keys()))
-    return len(unique)
-
-# =====================================================
-# Ingest Tables (PK-safe for MySQL)
-# =====================================================
-def ingest_table(file):
-    df = (
-        pd.read_csv(file)
-        if file.name.endswith(".csv")
-        else pd.read_excel(file, engine="openpyxl")
-    )
-
-    table_name = re.sub(
-        r"[^a-zA-Z0-9_]",
-        "_",
-        os.path.splitext(file.name)[0].lower(),
-    )
-    df.columns = [
-        re.sub(r"[^a-zA-Z0-9_]", "_", c.lower())
-        for c in df.columns
-    ]
-
-    metadata = MetaData()
-    columns = [
-        Column("id", Integer, primary_key=True, autoincrement=True)
-    ]
-
-    for col, dtype in df.dtypes.items():
-        if "int" in str(dtype):
-            columns.append(Column(col, BigInteger))
-        else:
-            columns.append(Column(col, Text))
-
-    table = Table(table_name, metadata, *columns)
-
-    with engine.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
-        metadata.create_all(conn)
-
-    df.to_sql(
-        table_name,
-        engine,
-        if_exists="append",
-        index=False,
-        method="multi",
-        chunksize=1000,
-    )
-
-    return table_name, df.shape
-
-# =====================================================
-# Sidebar Actions
-# =====================================================
+# Ingest documents button
 if st.sidebar.button("📥 Ingest documents"):
     docs = []
-
-    # Ingest uploaded files
     if uploaded_files:
         for f in uploaded_files:
             tmp = f"tmp_{f.name}"
@@ -212,8 +198,7 @@ if st.sidebar.button("📥 Ingest documents"):
                 t.write(f.read())
             try:
                 loader = (
-                    PyPDFLoader(tmp)
-                    if f.name.endswith(".pdf")
+                    PyPDFLoader(tmp) if f.name.endswith(".pdf")
                     else TextLoader(tmp, encoding="utf-8")
                 )
                 docs.extend(loader.load())
@@ -223,32 +208,25 @@ if st.sidebar.button("📥 Ingest documents"):
                 if os.path.exists(tmp):
                     os.remove(tmp)
 
-    # ✅ Also ingest any pending URL docs
-    if "_pending_url_docs" in st.session_state:
-        docs.extend(st.session_state.pop("_pending_url_docs"))
-
     if docs:
         with st.spinner("Ingesting documents..."):
-            count = ingest_documents(docs)
+            count = ingest_documents_direct(docs, collection_name)
         st.sidebar.success(f"✅ {count} chunks added to '{collection_name}'")
         st.rerun()
     else:
-        st.sidebar.warning("⚠️ No documents or URLs to ingest.")
+        st.sidebar.warning("⚠️ No files uploaded to ingest.")
 
+# Ingest tables button
 if mode == "📊 Database Q&A (Text-to-SQL)" and uploaded_tables:
     if st.sidebar.button("📥 Ingest Tables"):
         for f in uploaded_tables:
             try:
                 table, shape = ingest_table(f)
-                st.sidebar.success(
-                    f"✅ Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)"
-                )
+                st.sidebar.success(f"✅ Loaded `{table}` ({shape[0]} rows, {shape[1]} cols)")
             except Exception as e:
                 st.sidebar.error(f"❌ Failed to load {f.name}: {e}")
 
-# =====================================================
-# Clear Knowledge Base
-# =====================================================
+# Clear knowledge base button
 if st.sidebar.button("🗑️ Clear knowledge base"):
     try:
         vs = get_vectorstore(collection_name)
@@ -262,10 +240,13 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
     except Exception as e:
         st.sidebar.error(f"❌ Error clearing knowledge base: {e}")
 
-# Show document count
+# Fix 1b: DB count label — contextual based on mode
 try:
     doc_count = get_vectorstore(collection_name)._collection.count()
-    st.sidebar.caption(f"📚 Documents in DB: {doc_count}")
+    if mode == "📄 Document Q&A (RAG)":
+        st.sidebar.caption(f"📚 Documents in DB: {doc_count}")
+    else:
+        st.sidebar.caption("💾 Using MySQL database")
 except Exception:
     st.sidebar.caption("📚 Documents in DB: —")
 
@@ -275,6 +256,40 @@ except Exception:
 st.session_state.setdefault("session_id", str(uuid4()))
 st.session_state.setdefault("messages", [])
 st.session_state.setdefault("last_sql_df", None)
+
+# =====================================================
+# Fix 1: Visualization panel OUTSIDE chat bubble — persists on chart type change
+# =====================================================
+if st.session_state.get("last_sql_df") is not None and mode == "📊 Database Q&A (Text-to-SQL)":
+    df_vis = st.session_state["last_sql_df"].copy()
+    for c in df_vis.columns:
+        df_vis[c] = pd.to_numeric(df_vis[c], errors="ignore")
+
+    numeric_cols = df_vis.select_dtypes(include="number").columns.tolist()
+    categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
+
+    if numeric_cols and categorical_cols:
+        st.subheader("📊 Visualizations")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            chart_type = st.selectbox("Chart type", ["Bar", "Line", "Area", "Pie"], key="chart_type")
+        with col2:
+            x_col = st.selectbox("Category (X-axis)", categorical_cols, key="x_col")
+        with col3:
+            y_col = st.selectbox("Metric (Y-axis)", numeric_cols, key="y_col")
+
+        if chart_type == "Bar":
+            fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
+        elif chart_type == "Line":
+            fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
+        elif chart_type == "Area":
+            fig = px.area(df_vis, x=x_col, y=y_col)
+        elif chart_type == "Pie":
+            fig = px.pie(df_vis, names=x_col, values=y_col, hole=0.35)
+
+        fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
+        st.plotly_chart(fig, use_container_width=True)
+        st.divider()
 
 # =====================================================
 # Chat History
@@ -290,7 +305,6 @@ user_input = st.chat_input("Ask a question based on the uploaded knowledge")
 
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
-
     with st.chat_message("user"):
         st.markdown(user_input)
 
@@ -303,56 +317,23 @@ if user_input:
                 answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
                 st.warning(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
-
             else:
                 st.code(sql, language="sql")
-
                 try:
                     rows, cols = run_sql(sql)
                     df_res = pd.DataFrame(rows, columns=cols)
 
+                    # Store in session state for visualization panel
                     st.session_state["last_sql_df"] = df_res
-                    st.session_state["last_sql"] = sql
 
                     st.dataframe(df_res, use_container_width=True)
 
-                    # ✅ Fixed: Save successful SQL answer to chat history
                     answer_summary = f"Query executed successfully. {len(df_res)} rows returned."
                     st.session_state.messages.append(
                         {"role": "assistant", "content": f"```sql\n{sql}\n```\n\n{answer_summary}"}
                     )
-
-                    # =====================================================
-                    # 📊 Visualization Panel
-                    # =====================================================
-                    st.subheader("📊 Visualizations")
-
-                    df_vis = df_res.copy()
-                    for c in df_vis.columns:
-                        df_vis[c] = pd.to_numeric(df_vis[c], errors="ignore")
-
-                    numeric_cols = df_vis.select_dtypes(include="number").columns.tolist()
-                    categorical_cols = df_vis.select_dtypes(exclude="number").columns.tolist()
-
-                    if numeric_cols and categorical_cols:
-                        chart_type = st.selectbox("Chart type", ["Bar", "Line", "Area", "Pie"])
-                        x_col = st.selectbox("Category (X-axis)", categorical_cols)
-                        y_col = st.selectbox("Metric (Y-axis)", numeric_cols)
-
-                        if chart_type == "Bar":
-                            fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
-                        elif chart_type == "Line":
-                            fig = px.line(df_vis, x=x_col, y=y_col, markers=True)
-                        elif chart_type == "Area":
-                            fig = px.area(df_vis, x=x_col, y=y_col)
-                        elif chart_type == "Pie":
-                            fig = px.pie(df_vis, names=x_col, values=y_col, hole=0.35)
-
-                        fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    else:
-                        st.info("ℹ️ Not enough numeric and categorical columns for visualization.")
+                    # Rerun so visualization panel at top refreshes
+                    st.rerun()
 
                 except Exception as e:
                     answer = f"❌ SQL Execution Error: {e}"
@@ -377,12 +358,25 @@ if user_input:
                         )
                     st.markdown(answer)
 
-                    # Show sources
-                    sources = list({
-                        d.metadata.get("source", "Unknown") for d in retrieved_docs
-                    })
+                    # Sources
+                    sources = list({d.metadata.get("source", "Unknown") for d in retrieved_docs})
                     if sources:
                         st.caption(f"📎 Sources: {', '.join(sources)}")
+
+                    # Fix 3: Top chunks with keyword highlighting
+                    with st.expander("🔍 View top matching chunks", expanded=False):
+                        for i, doc in enumerate(retrieved_docs[:3]):
+                            src = doc.metadata.get("source", "Unknown")
+                            highlighted = highlight_keywords(doc.page_content, user_input)
+                            st.markdown(
+                                f"**Chunk {i+1}** — `{src}`<br>"
+                                f"<div style='background:#f8f9fa;padding:10px;border-left:3px solid"
+                                f" #4CAF50;border-radius:4px;font-size:0.88em;line-height:1.6'>"
+                                f"{highlighted}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            if i < len(retrieved_docs[:3]) - 1:
+                                st.divider()
 
             except Exception as e:
                 answer = f"❌ Error: {e}"
