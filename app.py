@@ -273,10 +273,22 @@ else:
 
 st.sidebar.divider()
 if st.sidebar.button("🗑️ Clear knowledge base"):
+    # Clear RAG vector DB
     vs = get_vectorstore(collection_name)
     ids = vs._collection.get().get("ids", [])
     if ids:
         vs._collection.delete(ids=ids)
+    
+    # FIX Issue 1: Also clear ALL SQL tables
+    try:
+        schema = get_schema()
+        if schema:
+            with engine.begin() as conn:
+                for table_name in schema:
+                    conn.execute(text(f"DROP TABLE IF EXISTS `{table_name}`"))
+    except Exception as e:
+        st.sidebar.warning(f"Could not clear SQL tables: {e}")
+    
     store.clear()
     st.session_state.clear()
     st.sidebar.success("Knowledge base cleared ✅")
@@ -292,8 +304,6 @@ if mode == "📄 Document Q&A (RAG)":
 # =====================================================
 st.session_state.setdefault("session_id", str(uuid4()))
 st.session_state.setdefault("messages", [])
-st.session_state.setdefault("last_sql_df", None)
-st.session_state.setdefault("last_sql", "")
 
 
 # =====================================================
@@ -351,23 +361,22 @@ def render_visualization(df_res: pd.DataFrame, sql: str) -> None:
     st.markdown("---")
 
 
-# Render persisted SQL results at the top (survives all reruns)
-if (
-    mode == "📊 Database Q&A (Text-to-SQL)"
-    and st.session_state["last_sql_df"] is not None
-):
-    render_visualization(
-        st.session_state["last_sql_df"],
-        st.session_state["last_sql"],
-    )
-
-
 # =====================================================
 # Chat history
+# FIX Issue 2: SQL results now render INLINE with their
+# respective question in chat history, not at the top.
 # =====================================================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        
+        # If this message has associated SQL results, render them here
+        if msg["role"] == "assistant" and msg.get("sql_result"):
+            result_data = msg["sql_result"]
+            render_visualization(
+                result_data["df"], 
+                result_data["sql"]
+            )
 
 
 # =====================================================
@@ -402,15 +411,17 @@ if user_input:
                 rows, cols = run_sql(sql)
                 df_res = pd.DataFrame(rows, columns=list(cols))
 
-                # BUG 2 FIX: persist so render_visualization() above survives reruns
-                st.session_state["last_sql_df"] = df_res
-                st.session_state["last_sql"] = sql
-
-                # Only a short summary goes into the chat bubble
-                summary = f"✅ Query executed. **{len(df_res):,} rows** returned. See results above ↑"
-                st.session_state.messages.append({"role": "assistant", "content": summary})
+                # FIX Issue 2: Store result WITH the message, not in separate state
+                summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": summary,
+                    "sql_result": {"df": df_res, "sql": sql}  # Embedded result
+                })
+                
                 with st.chat_message("assistant"):
                     st.markdown(summary)
+                    render_visualization(df_res, sql)
 
             except Exception as e:
                 answer = f"❌ SQL Execution Error: {e}"
@@ -418,7 +429,7 @@ if user_input:
                 with st.chat_message("assistant"):
                     st.error(answer)
 
-        st.rerun()  # triggers render_visualization() at top of page
+        # No st.rerun() — let visualization stay inline
 
     # ── RAG ────────────────────────────────────────────────────────────────
     else:
