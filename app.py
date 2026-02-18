@@ -385,7 +385,7 @@ def render_visualization(df_res: pd.DataFrame, sql: str, msg_index: int) -> None
             fig = px.pie(df_vis, names=x_col, values=y_col, hole=0.35)
 
         fig.update_layout(margin=dict(t=40, l=20, r=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"chart_{msg_index}")
     elif len(df_res) > 0:
         st.info("ℹ️ Table-only result — no numeric+categorical pair available for charting.")
 
