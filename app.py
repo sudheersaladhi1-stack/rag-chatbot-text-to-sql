@@ -78,6 +78,22 @@ def format_docs(docs: list[Document]) -> str:
     return "\n\n".join(d.page_content for d in docs)
 
 
+def highlight_text(text: str, query: str) -> str:
+    """Highlight query words in text for the chunks debug panel."""
+    import html
+    text = html.escape(text)
+    words = re.findall(r"\w+", query.lower())
+    for word in set(words):
+        if len(word) < 3:
+            continue
+        pattern = re.compile(rf"({re.escape(word)})", re.IGNORECASE)
+        text = pattern.sub(
+            r"<mark style='background-color:#ffe066'>\1</mark>",
+            text,
+        )
+    return text
+
+
 def load_url_as_documents(url: str) -> list[Document]:
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
     r.raise_for_status()
@@ -318,7 +334,12 @@ st.session_state.setdefault("messages", [])
 # at the top of the page, persisted in session_state so they
 # survive any rerun (including selectbox interactions).
 # =====================================================
-def render_visualization(df_res: pd.DataFrame, sql: str) -> None:
+# BUG 2 FIX: Visualization renderer with unique keys
+# Each message needs unique widget keys to avoid
+# StreamlitDuplicateElementKey when rendering multiple
+# SQL results in chat history.
+# =====================================================
+def render_visualization(df_res: pd.DataFrame, sql: str, msg_index: int) -> None:
     st.markdown("---")
     st.subheader("📊 Query Results")
     st.code(sql, language="sql")
@@ -337,12 +358,22 @@ def render_visualization(df_res: pd.DataFrame, sql: str) -> None:
         col1, col2, col3 = st.columns(3)
         with col1:
             chart_type = st.selectbox(
-                "Chart type", ["Bar", "Line", "Area", "Pie"], key="chart_type"
+                "Chart type", 
+                ["Bar", "Line", "Area", "Pie"], 
+                key=f"chart_type_{msg_index}"  # Unique key per message
             )
         with col2:
-            x_col = st.selectbox("Category (X)", categorical_cols, key="x_col")
+            x_col = st.selectbox(
+                "Category (X)", 
+                categorical_cols, 
+                key=f"x_col_{msg_index}"
+            )
         with col3:
-            y_col = st.selectbox("Metric (Y)", numeric_cols, key="y_col")
+            y_col = st.selectbox(
+                "Metric (Y)", 
+                numeric_cols, 
+                key=f"y_col_{msg_index}"
+            )
 
         if chart_type == "Bar":
             fig = px.bar(df_vis, x=x_col, y=y_col, text=y_col)
@@ -366,7 +397,7 @@ def render_visualization(df_res: pd.DataFrame, sql: str) -> None:
 # FIX Issue 2: SQL results now render INLINE with their
 # respective question in chat history, not at the top.
 # =====================================================
-for msg in st.session_state.messages:
+for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
@@ -375,7 +406,8 @@ for msg in st.session_state.messages:
             result_data = msg["sql_result"]
             render_visualization(
                 result_data["df"], 
-                result_data["sql"]
+                result_data["sql"],
+                idx  # BUG 2 FIX: unique index for widget keys
             )
 
 
@@ -421,7 +453,8 @@ if user_input:
                 
                 with st.chat_message("assistant"):
                     st.markdown(summary)
-                    render_visualization(df_res, sql)
+                    # Use len(messages)-1 as index for the message we just appended
+                    render_visualization(df_res, sql, len(st.session_state.messages) - 1)
 
             except Exception as e:
                 answer = f"❌ SQL Execution Error: {e}"
@@ -439,6 +472,19 @@ if user_input:
             raw_docs = retriever.invoke(user_input)
         except Exception as e:
             st.warning(f"Retrieval failed: {e}")
+
+        # BUG 1 FIX: Chunks debug panel (was removed, now restored)
+        with st.expander("🔍 Retrieved chunks (highlighted)"):
+            st.write(f"Retrieved **{len(raw_docs)} chunks** from the knowledge base.")
+            for i, doc in enumerate(raw_docs[:6]):  # Show up to 6 chunks
+                st.markdown(f"**Chunk {i+1}:**")
+                st.markdown(
+                    highlight_text(doc.page_content[:800], user_input),
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"Source: {doc.metadata.get('source', 'unknown')}")
+                if i < len(raw_docs) - 1:
+                    st.markdown("---")
 
         seen: set[str] = set()
         docs: list[Document] = []
