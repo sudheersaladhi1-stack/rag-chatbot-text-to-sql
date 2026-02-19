@@ -30,7 +30,7 @@ from src.rag_chat_memory import rag_chain_with_memory, store
 
 # Text-to-SQL
 from src.text_to_sql.db import engine, run_sql
-from src.text_to_sql.schema_loader import get_schema
+from src.text_to_sql.schema_loader import get_schema, get_schema_legacy
 from src.text_to_sql.sql_chain import generate_sql
 from src.text_to_sql.sql_guard import is_safe_sql
 
@@ -150,7 +150,7 @@ def load_retriever(collection: str):
 # =====================================================
 def show_db_stats() -> None:
     try:
-        schema = get_schema()
+        schema = get_schema_legacy()  # Use simple format for sidebar
         if not schema:
             st.sidebar.caption("📭 No tables loaded yet.")
             return
@@ -297,7 +297,7 @@ if st.sidebar.button("🗑️ Clear knowledge base"):
     
     # FIX Issue 1: Also clear ALL SQL tables
     try:
-        schema = get_schema()
+        schema = get_schema_legacy()  # Use simple format
         if schema:
             with engine.begin() as conn:
                 for table_name in schema:
