@@ -490,8 +490,6 @@ if user_input:
                     "sql_result": {"df": df_res, "sql": sql},
                     "thinking": full_response  # Store full thinking + SQL
                 })
-                    "sql_result": {"df": df_res, "sql": sql}  # Embedded result
-                })
                 
                 with st.chat_message("assistant"):
                     st.markdown(summary)
