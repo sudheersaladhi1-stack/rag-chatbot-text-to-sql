@@ -440,12 +440,12 @@ if user_input:
         thinking_placeholder = st.empty()
         sql_placeholder = st.empty()
         
-        # Stream the LLM response
-        streamed_response = ""
+        # Use a list to store streamed response (mutable, no nonlocal needed)
+        response_buffer = [""]
         
         def stream_handler(token: str):
-            nonlocal streamed_response
-            streamed_response += token
+            response_buffer[0] += token
+            streamed_response = response_buffer[0]
             
             # Parse thinking vs SQL in real-time
             if "💭 **Thinking:**" in streamed_response:
