@@ -440,7 +440,7 @@ if user_input:
         thinking_placeholder = st.empty()
         sql_placeholder = st.empty()
         
-        # Use a list to store streamed response (mutable, no nonlocal needed)
+        # Use a list to store streamed response (mutable)
         response_buffer = [""]
         
         def stream_handler(token: str):
@@ -461,47 +461,68 @@ if user_input:
                 # Still streaming thinking
                 thinking_placeholder.markdown(streamed_response)
         
-        # Generate SQL with streaming
-        full_response = generate_sql(user_input, stream_callback=stream_handler)
+        # Generate SQL with streaming - returns dict with queries list
+        result = generate_sql(user_input, stream_callback=stream_handler)
+        full_response = result["full_response"]
+        queries = result["queries"]
+        is_multi_step = result["is_multi_step"]
         
-        # Extract final SQL from the response
-        if "```sql" in full_response:
-            sql = full_response.split("```sql")[1].split("```")[0].strip()
-        else:
-            # Fallback: entire response is SQL
-            sql = full_response.strip()
-
-        if not is_safe_sql(sql):
-            answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
+        if not queries:
+            answer = "⚠️ Could not generate a valid SQL query. Please rephrase your question."
             st.session_state.messages.append({"role": "assistant", "content": answer})
             with st.chat_message("assistant"):
                 st.markdown(answer)
         else:
-            try:
-                rows, cols = run_sql(sql)
-                df_res = pd.DataFrame(rows, columns=list(cols))
-
-                # FIX Issue 2: Store result WITH the message, not in separate state
-                summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": summary,
-                    "sql_result": {"df": df_res, "sql": sql},
-                    "thinking": full_response  # Store full thinking + SQL
-                })
-                
-                with st.chat_message("assistant"):
-                    st.markdown(summary)
-                    # Use len(messages)-1 as index for the message we just appended
-                    render_visualization(df_res, sql, len(st.session_state.messages) - 1)
-
-            except Exception as e:
-                answer = f"❌ SQL Execution Error: {e}"
+            # Validate all queries are safe
+            unsafe_queries = [q for q in queries if not is_safe_sql(q)]
+            if unsafe_queries:
+                answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 with st.chat_message("assistant"):
-                    st.error(answer)
+                    st.markdown(answer)
+            else:
+                try:
+                    # Execute queries in sequence
+                    if is_multi_step:
+                        st.info(f"🔄 Executing {len(queries)} steps...")
+                        
+                        # Execute all queries, keep last result
+                        for i, query in enumerate(queries):
+                            rows, cols = run_sql(query)
+                            df_res = pd.DataFrame(rows, columns=list(cols))
+                            
+                            if i < len(queries) - 1:
+                                # Intermediate step
+                                st.caption(f"✓ Step {i+1} completed: {len(df_res)} rows")
+                        
+                        # Final result is from last query
+                        final_sql = "\n\n-- Multi-step execution:\n" + "\n\n".join(
+                            f"-- Step {i+1}:\n{q}" for i, q in enumerate(queries)
+                        )
+                    else:
+                        # Single query
+                        rows, cols = run_sql(queries[0])
+                        df_res = pd.DataFrame(rows, columns=list(cols))
+                        final_sql = queries[0]
 
-        # No st.rerun() — let visualization stay inline
+                    # Store result
+                    summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": summary,
+                        "sql_result": {"df": df_res, "sql": final_sql},
+                        "thinking": full_response
+                    })
+                    
+                    with st.chat_message("assistant"):
+                        st.markdown(summary)
+                        render_visualization(df_res, final_sql, len(st.session_state.messages) - 1)
+
+                except Exception as e:
+                    answer = f"❌ SQL Execution Error: {e}"
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                    with st.chat_message("assistant"):
+                        st.error(answer)
 
     # ── RAG ────────────────────────────────────────────────────────────────
     else:

@@ -1,5 +1,6 @@
-"""Text-to-SQL chain with enhanced schema awareness and streaming support."""
+"""Text-to-SQL chain with multi-step query execution support."""
 
+import re
 from langchain_openai import ChatOpenAI
 from .schema_loader import get_schema
 from .sql_prompt import SQL_PROMPT
@@ -8,20 +9,12 @@ from .sql_prompt import SQL_PROMPT
 llm = ChatOpenAI(
     model="gpt-3.5-turbo",
     temperature=0,
-    streaming=True  # Enable streaming
+    streaming=True
 )
 
 
 def format_schema_for_llm(schema: dict) -> str:
-    """
-    Format enriched schema into a clear, detailed description for the LLM.
-    
-    Args:
-        schema: Dictionary with table -> {columns: [...]} structure
-    
-    Returns:
-        Formatted string with table names, column names, types, and sample values
-    """
+    """Format enriched schema into a clear description for the LLM."""
     if not schema:
         return "No tables available."
     
@@ -35,7 +28,6 @@ def format_schema_for_llm(schema: dict) -> str:
             col_type = col["type"]
             samples = col["sample_values"]
             
-            # Format sample values based on type
             if samples:
                 if isinstance(samples[0], str):
                     samples_str = ", ".join(f"'{s}'" for s in samples[:3])
@@ -43,8 +35,7 @@ def format_schema_for_llm(schema: dict) -> str:
                     samples_str = ", ".join(str(s) for s in samples[:3])
                 
                 lines.append(
-                    f"  - {col_name} ({col_type}) "
-                    f"— sample values: {samples_str}"
+                    f"  - {col_name} ({col_type}) — sample values: {samples_str}"
                 )
             else:
                 lines.append(f"  - {col_name} ({col_type})")
@@ -52,23 +43,54 @@ def format_schema_for_llm(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_sql(question: str, stream_callback=None) -> str:
+def extract_sql_queries(response: str) -> list[str]:
     """
-    Generate SQL query from natural language question.
+    Extract SQL queries from LLM response.
+    Handles both single and multi-step queries.
+    
+    Returns:
+        List of SQL query strings (one or more)
+    """
+    # Find all SQL code blocks
+    sql_pattern = r"```sql\s*(.*?)\s*```"
+    matches = re.findall(sql_pattern, response, re.DOTALL | re.IGNORECASE)
+    
+    if matches:
+        # Clean up each query
+        queries = [q.strip() for q in matches if q.strip()]
+        return queries
+    
+    # Fallback: entire response might be SQL
+    response_clean = response.strip()
+    if response_clean.upper().startswith("SELECT"):
+        return [response_clean]
+    
+    return []
+
+
+def generate_sql(question: str, stream_callback=None) -> dict:
+    """
+    Generate SQL query/queries from natural language question.
     
     Args:
         question: User's natural language query
-        stream_callback: Optional callback function(chunk: str) for streaming tokens
+        stream_callback: Optional callback function(chunk: str) for streaming
     
     Returns:
-        SQL query string or error message
+        dict with:
+            - 'full_response': Complete LLM response with thinking
+            - 'queries': List of SQL queries to execute in order
+            - 'is_multi_step': Boolean indicating if multiple queries
     """
     schema = get_schema()
 
     if not schema:
-        return "-- Error: Database is empty. Please upload a CSV/Excel file first."
+        return {
+            "full_response": "-- Error: Database is empty. Please upload a CSV/Excel file first.",
+            "queries": [],
+            "is_multi_step": False
+        }
 
-    # Format enriched schema for the LLM
     schema_text = format_schema_for_llm(schema)
 
     try:
@@ -83,17 +105,29 @@ def generate_sql(question: str, stream_callback=None) -> str:
             ):
                 token = chunk.content
                 full_response += token
-                stream_callback(token)  # Stream each token to UI
-            return full_response.strip()
+                stream_callback(token)
         else:
-            # Non-streaming mode (backward compatible)
+            # Non-streaming mode
             response = llm.invoke(
                 SQL_PROMPT.format(
                     schema=schema_text,
                     question=question
                 )
             )
-            return response.content.strip()
+            full_response = response.content
+        
+        # Extract SQL queries
+        queries = extract_sql_queries(full_response)
+        
+        return {
+            "full_response": full_response.strip(),
+            "queries": queries,
+            "is_multi_step": len(queries) > 1
+        }
     
     except Exception as e:
-        return f"-- Error generating SQL: {str(e)}"
+        return {
+            "full_response": f"-- Error generating SQL: {str(e)}",
+            "queries": [],
+            "is_multi_step": False
+        }
