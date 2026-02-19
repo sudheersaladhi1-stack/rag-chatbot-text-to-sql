@@ -436,21 +436,23 @@ if user_input:
 
     # ── TEXT-TO-SQL ────────────────────────────────────────────────────────
     if mode == "📊 Database Q&A (Text-to-SQL)":
-        # Streaming placeholder for thinking + SQL
+        # Streaming placeholders
         thinking_placeholder = st.empty()
         sql_placeholder = st.empty()
         
-        # Use a list to store streamed response (mutable)
+        # Use list for mutable state
         response_buffer = [""]
         
         def stream_handler(token: str):
             response_buffer[0] += token
             streamed_response = response_buffer[0]
             
-            # Parse thinking vs SQL in real-time
+            # Display thinking and SQL separately as they stream
             if "💭 **Thinking:**" in streamed_response:
                 parts = streamed_response.split("```sql")
                 thinking_part = parts[0]
+                
+                # Show only insights (SQL will be filtered out)
                 thinking_placeholder.markdown(thinking_part)
                 
                 if len(parts) > 1:
@@ -461,68 +463,45 @@ if user_input:
                 # Still streaming thinking
                 thinking_placeholder.markdown(streamed_response)
         
-        # Generate SQL with streaming - returns dict with queries list
+        # Generate SQL with streaming
         result = generate_sql(user_input, stream_callback=stream_handler)
-        full_response = result["full_response"]
-        queries = result["queries"]
-        is_multi_step = result["is_multi_step"]
+        thinking = result["thinking"]  # Insights only, no SQL
+        sql = result["sql"]
         
-        if not queries:
+        if not sql:
             answer = "⚠️ Could not generate a valid SQL query. Please rephrase your question."
             st.session_state.messages.append({"role": "assistant", "content": answer})
             with st.chat_message("assistant"):
                 st.markdown(answer)
+        elif not is_safe_sql(sql):
+            answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            with st.chat_message("assistant"):
+                st.markdown(answer)
         else:
-            # Validate all queries are safe
-            unsafe_queries = [q for q in queries if not is_safe_sql(q)]
-            if unsafe_queries:
-                answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
+            try:
+                # Execute the CTE-based query
+                rows, cols = run_sql(sql)
+                df_res = pd.DataFrame(rows, columns=list(cols))
+
+                # Store result with insights-only thinking
+                summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": summary,
+                    "sql_result": {"df": df_res, "sql": sql},
+                    "thinking": thinking  # Insights only, SQL removed
+                })
+                
+                with st.chat_message("assistant"):
+                    st.markdown(summary)
+                    render_visualization(df_res, sql, len(st.session_state.messages) - 1)
+
+            except Exception as e:
+                answer = f"❌ SQL Execution Error: {e}"
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 with st.chat_message("assistant"):
-                    st.markdown(answer)
-            else:
-                try:
-                    # Execute queries in sequence
-                    if is_multi_step:
-                        st.info(f"🔄 Executing {len(queries)} steps...")
-                        
-                        # Execute all queries, keep last result
-                        for i, query in enumerate(queries):
-                            rows, cols = run_sql(query)
-                            df_res = pd.DataFrame(rows, columns=list(cols))
-                            
-                            if i < len(queries) - 1:
-                                # Intermediate step
-                                st.caption(f"✓ Step {i+1} completed: {len(df_res)} rows")
-                        
-                        # Final result is from last query
-                        final_sql = "\n\n-- Multi-step execution:\n" + "\n\n".join(
-                            f"-- Step {i+1}:\n{q}" for i, q in enumerate(queries)
-                        )
-                    else:
-                        # Single query
-                        rows, cols = run_sql(queries[0])
-                        df_res = pd.DataFrame(rows, columns=list(cols))
-                        final_sql = queries[0]
-
-                    # Store result
-                    summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
-                    st.session_state.messages.append({
-                        "role": "assistant", 
-                        "content": summary,
-                        "sql_result": {"df": df_res, "sql": final_sql},
-                        "thinking": full_response
-                    })
-                    
-                    with st.chat_message("assistant"):
-                        st.markdown(summary)
-                        render_visualization(df_res, final_sql, len(st.session_state.messages) - 1)
-
-                except Exception as e:
-                    answer = f"❌ SQL Execution Error: {e}"
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                    with st.chat_message("assistant"):
-                        st.error(answer)
+                    st.error(answer)
 
     # ── RAG ────────────────────────────────────────────────────────────────
     else:

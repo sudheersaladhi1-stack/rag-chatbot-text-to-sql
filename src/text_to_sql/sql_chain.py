@@ -1,4 +1,4 @@
-"""Text-to-SQL chain with multi-step query execution support."""
+"""Text-to-SQL chain with CTE-based queries and insight extraction."""
 
 import re
 from langchain_openai import ChatOpenAI
@@ -14,7 +14,7 @@ llm = ChatOpenAI(
 
 
 def format_schema_for_llm(schema: dict) -> str:
-    """Format enriched schema into a clear description for the LLM."""
+    """Format enriched schema for the LLM."""
     if not schema:
         return "No tables available."
     
@@ -43,52 +43,82 @@ def format_schema_for_llm(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def extract_sql_queries(response: str) -> list[str]:
+def extract_thinking_and_sql(response: str) -> tuple[str, str]:
     """
-    Extract SQL queries from LLM response.
-    Handles both single and multi-step queries.
+    Extract thinking (insights only) and SQL separately.
+    Remove any SQL code from the thinking section.
     
     Returns:
-        List of SQL query strings (one or more)
+        (thinking_text, sql_query)
     """
-    # Find all SQL code blocks
-    sql_pattern = r"```sql\s*(.*?)\s*```"
-    matches = re.findall(sql_pattern, response, re.DOTALL | re.IGNORECASE)
+    # Extract thinking section
+    thinking_match = re.search(
+        r"💭\s*\*\*Thinking:\*\*(.*?)```sql",
+        response,
+        re.DOTALL | re.IGNORECASE
+    )
     
-    if matches:
-        # Clean up each query
-        queries = [q.strip() for q in matches if q.strip()]
-        return queries
+    if thinking_match:
+        thinking = thinking_match.group(1).strip()
+    else:
+        # Fallback: everything before first ```sql
+        parts = response.split("```sql")
+        thinking = parts[0].replace("💭", "").replace("**Thinking:**", "").strip()
     
-    # Fallback: entire response might be SQL
-    response_clean = response.strip()
-    if response_clean.upper().startswith("SELECT"):
-        return [response_clean]
+    # Remove any SQL-like patterns from thinking
+    # (table names, WHERE clauses, SELECT statements)
+    sql_patterns = [
+        r'\bSELECT\b.*',
+        r'\bFROM\b.*',
+        r'\bWHERE\b.*',
+        r'\bGROUP BY\b.*',
+        r'\bORDER BY\b.*',
+        r'\bWITH\b\s+\w+\s+AS\b.*',
+    ]
     
-    return []
+    for pattern in sql_patterns:
+        thinking = re.sub(pattern, '', thinking, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Extract SQL query
+    sql_match = re.search(
+        r"```sql\s*(.*?)\s*```",
+        response,
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    if sql_match:
+        sql = sql_match.group(1).strip()
+    else:
+        # Fallback: check if entire response is SQL
+        if response.strip().upper().startswith(("SELECT", "WITH")):
+            sql = response.strip()
+        else:
+            sql = ""
+    
+    return thinking, sql
 
 
 def generate_sql(question: str, stream_callback=None) -> dict:
     """
-    Generate SQL query/queries from natural language question.
+    Generate SQL query with business insights.
     
     Args:
         question: User's natural language query
-        stream_callback: Optional callback function(chunk: str) for streaming
+        stream_callback: Optional callback(chunk: str) for streaming
     
     Returns:
         dict with:
-            - 'full_response': Complete LLM response with thinking
-            - 'queries': List of SQL queries to execute in order
-            - 'is_multi_step': Boolean indicating if multiple queries
+            - 'thinking': Business insights only (no SQL)
+            - 'sql': SQL query string
+            - 'full_response': Complete LLM output
     """
     schema = get_schema()
 
     if not schema:
         return {
-            "full_response": "-- Error: Database is empty. Please upload a CSV/Excel file first.",
-            "queries": [],
-            "is_multi_step": False
+            "thinking": "Database is empty. Please upload data first.",
+            "sql": "",
+            "full_response": "-- Error: Database is empty."
         }
 
     schema_text = format_schema_for_llm(schema)
@@ -116,18 +146,18 @@ def generate_sql(question: str, stream_callback=None) -> dict:
             )
             full_response = response.content
         
-        # Extract SQL queries
-        queries = extract_sql_queries(full_response)
+        # Extract thinking and SQL separately
+        thinking, sql = extract_thinking_and_sql(full_response)
         
         return {
-            "full_response": full_response.strip(),
-            "queries": queries,
-            "is_multi_step": len(queries) > 1
+            "thinking": thinking,
+            "sql": sql,
+            "full_response": full_response.strip()
         }
     
     except Exception as e:
         return {
-            "full_response": f"-- Error generating SQL: {str(e)}",
-            "queries": [],
-            "is_multi_step": False
+            "thinking": f"Error: {str(e)}",
+            "sql": "",
+            "full_response": f"-- Error generating SQL: {str(e)}"
         }
