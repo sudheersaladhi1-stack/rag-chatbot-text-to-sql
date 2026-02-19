@@ -474,10 +474,20 @@ if user_input:
             with st.chat_message("assistant"):
                 st.markdown(answer)
         elif not is_safe_sql(sql):
-            answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
+            # Show more detail about why query was rejected
+            sql_lower = sql.lower().strip()
+            if not (sql_lower.startswith("select") or sql_lower.startswith("with")):
+                reason = f"Query must start with SELECT or WITH (for CTEs). Found: {sql[:20]}..."
+            else:
+                reason = "Query contains forbidden operations (INSERT/UPDATE/DELETE/DROP/etc.)"
+            
+            answer = f"⚠️ I can only run SELECT queries. {reason}"
             st.session_state.messages.append({"role": "assistant", "content": answer})
             with st.chat_message("assistant"):
                 st.markdown(answer)
+                # Show the problematic SQL for debugging
+                with st.expander("🔍 See generated SQL"):
+                    st.code(sql, language="sql")
         else:
             try:
                 # Execute the CTE-based query
@@ -498,10 +508,13 @@ if user_input:
                     render_visualization(df_res, sql, len(st.session_state.messages) - 1)
 
             except Exception as e:
-                answer = f"❌ SQL Execution Error: {e}"
+                answer = f"❌ SQL Execution Error: {str(e)}"
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 with st.chat_message("assistant"):
                     st.error(answer)
+                    # Show the SQL that caused the error for debugging
+                    with st.expander("🔍 See SQL that caused error"):
+                        st.code(sql, language="sql")
 
     # ── RAG ────────────────────────────────────────────────────────────────
     else:
