@@ -436,41 +436,40 @@ if user_input:
 
     # ── TEXT-TO-SQL ────────────────────────────────────────────────────────
     if mode == "📊 Database Q&A (Text-to-SQL)":
-        with st.chat_message("assistant"):
-            # Streaming placeholder for thinking + SQL
-            thinking_placeholder = st.empty()
-            sql_placeholder = st.empty()
+        # Streaming placeholder for thinking + SQL
+        thinking_placeholder = st.empty()
+        sql_placeholder = st.empty()
+        
+        # Stream the LLM response
+        streamed_response = ""
+        
+        def stream_handler(token: str):
+            nonlocal streamed_response
+            streamed_response += token
             
-            # Stream the LLM response
-            streamed_response = ""
-            
-            def stream_handler(token: str):
-                nonlocal streamed_response
-                streamed_response += token
+            # Parse thinking vs SQL in real-time
+            if "💭 **Thinking:**" in streamed_response:
+                parts = streamed_response.split("```sql")
+                thinking_part = parts[0]
+                thinking_placeholder.markdown(thinking_part)
                 
-                # Parse thinking vs SQL in real-time
-                if "💭 **Thinking:**" in streamed_response:
-                    parts = streamed_response.split("```sql")
-                    thinking_part = parts[0]
-                    thinking_placeholder.markdown(thinking_part)
-                    
-                    if len(parts) > 1:
-                        # SQL is being streamed
-                        sql_part = parts[1].split("```")[0]
-                        sql_placeholder.code(sql_part, language="sql")
-                else:
-                    # Still streaming thinking
-                    thinking_placeholder.markdown(streamed_response)
-            
-            # Generate SQL with streaming
-            full_response = generate_sql(user_input, stream_callback=stream_handler)
-            
-            # Extract final SQL from the response
-            if "```sql" in full_response:
-                sql = full_response.split("```sql")[1].split("```")[0].strip()
+                if len(parts) > 1:
+                    # SQL is being streamed
+                    sql_part = parts[1].split("```")[0]
+                    sql_placeholder.code(sql_part, language="sql")
             else:
-                # Fallback: entire response is SQL
-                sql = full_response.strip()
+                # Still streaming thinking
+                thinking_placeholder.markdown(streamed_response)
+        
+        # Generate SQL with streaming
+        full_response = generate_sql(user_input, stream_callback=stream_handler)
+        
+        # Extract final SQL from the response
+        if "```sql" in full_response:
+            sql = full_response.split("```sql")[1].split("```")[0].strip()
+        else:
+            # Fallback: entire response is SQL
+            sql = full_response.strip()
 
         if not is_safe_sql(sql):
             answer = "⚠️ I can only run SELECT queries. Please rephrase your question."
