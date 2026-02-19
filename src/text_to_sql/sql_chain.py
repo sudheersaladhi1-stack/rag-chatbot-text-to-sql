@@ -1,4 +1,4 @@
-"""Text-to-SQL chain with enhanced schema awareness."""
+"""Text-to-SQL chain with enhanced schema awareness and streaming support."""
 
 from langchain_openai import ChatOpenAI
 from .schema_loader import get_schema
@@ -7,7 +7,8 @@ from .sql_prompt import SQL_PROMPT
 
 llm = ChatOpenAI(
     model="gpt-3.5-turbo",
-    temperature=0
+    temperature=0,
+    streaming=True  # Enable streaming
 )
 
 
@@ -51,12 +52,13 @@ def format_schema_for_llm(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_sql(question: str) -> str:
+def generate_sql(question: str, stream_callback=None) -> str:
     """
     Generate SQL query from natural language question.
     
     Args:
         question: User's natural language query
+        stream_callback: Optional callback function(chunk: str) for streaming tokens
     
     Returns:
         SQL query string or error message
@@ -70,13 +72,28 @@ def generate_sql(question: str) -> str:
     schema_text = format_schema_for_llm(schema)
 
     try:
-        response = llm.invoke(
-            SQL_PROMPT.format(
-                schema=schema_text,
-                question=question
+        if stream_callback:
+            # Streaming mode
+            full_response = ""
+            for chunk in llm.stream(
+                SQL_PROMPT.format(
+                    schema=schema_text,
+                    question=question
+                )
+            ):
+                token = chunk.content
+                full_response += token
+                stream_callback(token)  # Stream each token to UI
+            return full_response.strip()
+        else:
+            # Non-streaming mode (backward compatible)
+            response = llm.invoke(
+                SQL_PROMPT.format(
+                    schema=schema_text,
+                    question=question
+                )
             )
-        )
-        return response.content.strip()
+            return response.content.strip()
     
     except Exception as e:
         return f"-- Error generating SQL: {str(e)}"
