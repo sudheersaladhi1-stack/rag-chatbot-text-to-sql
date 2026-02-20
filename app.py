@@ -409,21 +409,30 @@ def render_visualization(df_res: pd.DataFrame, sql: str, msg_index: int, insight
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        
-        # If this message has thinking process (SQL generation), show it
+
+        # Thinking expander (collapsed in history — was live-expanded during streaming)
         if msg["role"] == "assistant" and msg.get("thinking"):
             with st.expander("🧠 View AI thinking process", expanded=False):
                 st.markdown(msg["thinking"])
-        
-        # If this message has associated SQL results, render them here
+
+        # Unsafe SQL debug
+        if msg["role"] == "assistant" and msg.get("unsafe_sql"):
+            with st.expander("🔍 See generated SQL"):
+                st.code(msg["unsafe_sql"], language="sql")
+
+        # Error SQL debug
+        if msg["role"] == "assistant" and msg.get("error_sql"):
+            with st.expander("🔍 See SQL that caused error"):
+                st.code(msg["error_sql"], language="sql")
+
+        # SQL results — use render_visualization with unique keys
         if msg["role"] == "assistant" and msg.get("sql_result"):
             result_data = msg["sql_result"]
-            insights = result_data.get("insights", "")
             render_visualization(
-                result_data["df"], 
+                result_data["df"],
                 result_data["sql"],
-                idx,  # BUG 2 FIX: unique index for widget keys
-                insights
+                idx,
+                result_data.get("insights", ""),
             )
 
 
@@ -447,84 +456,100 @@ if user_input:
 
     # ── TEXT-TO-SQL ────────────────────────────────────────────────────────
     if mode == "📊 Database Q&A (Text-to-SQL)":
-        # Single placeholder for thinking only (no SQL shown here)
-        thinking_placeholder = st.empty()
-        
-        # Use list for mutable state
+        # ── Phase 1: Live streaming of thinking + SQL ──────────────────────
+        # Thinking streams into a visible expander; SQL streams into a code block.
+        # After streaming completes we store the result and st.rerun() so the
+        # history loop renders the final state — this eliminates the grey flash
+        # caused by double-rendering (inline + history loop).
+
+        with st.chat_message("assistant"):
+            # Show a live expander so the user can watch thinking stream in
+            thinking_expander = st.expander("🧠 AI is thinking…", expanded=True)
+            thinking_area = thinking_expander.empty()
+
+            sql_label = st.empty()        # "Generating SQL…" label
+            sql_stream_area = st.empty()  # live SQL code block
+
         response_buffer = [""]
-        
+
         def stream_handler(token: str):
             response_buffer[0] += token
-            streamed_response = response_buffer[0]
-            
-            # Show ONLY the thinking/insight text — never SQL
-            if "💭 **Thinking:**" in streamed_response:
-                # Split off anything from ```sql onward so SQL never appears here
-                thinking_part = streamed_response.split("```sql")[0]
-                thinking_placeholder.markdown(thinking_part)
+            streamed = response_buffer[0]
+
+            # Split response into thinking vs SQL parts
+            if "```sql" in streamed:
+                parts = streamed.split("```sql")
+                # Thinking part: everything before ```sql, strip SQL-free markers
+                raw_thinking = parts[0].replace("💭 **Thinking:**", "").replace("Thinking:", "").strip()
+                thinking_area.markdown(raw_thinking)
+
+                # SQL part: everything inside the first ```sql … ```
+                sql_streamed = parts[1].split("```")[0] if len(parts) > 1 else ""
+                if sql_streamed.strip():
+                    sql_label.markdown("**🔄 Generating SQL…**")
+                    sql_stream_area.code(sql_streamed.strip(), language="sql")
             else:
-                # Still accumulating the thinking section
-                thinking_placeholder.markdown(streamed_response)
-        
-        # Generate SQL with streaming
+                # Still accumulating the thinking section — strip marker then display
+                raw_thinking = streamed.replace("💭 **Thinking:**", "").replace("Thinking:", "").strip()
+                thinking_area.markdown(raw_thinking)
+
+        # ── Generate SQL (streaming) ────────────────────────────────────────
         result = generate_sql(user_input, stream_callback=stream_handler)
-        thinking = result["thinking"]  # Insights only, no SQL
+        thinking = result["thinking"]   # clean, SQL-free thinking text
         sql = result["sql"]
-        
-        # Clear the streaming placeholder — SQL will appear cleanly in render_visualization
-        thinking_placeholder.empty()
-        
+
+        # Clear live streaming widgets — history loop will render the final state
+        sql_label.empty()
+        sql_stream_area.empty()
+
+        # ── Phase 2: Process result and rerun cleanly ──────────────────────
         if not sql:
             answer = "⚠️ Could not generate a valid SQL query. Please rephrase your question."
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            with st.chat_message("assistant"):
-                st.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer, "thinking": thinking})
+            st.rerun()
+
         elif not is_safe_sql(sql):
-            # Show more detail about why query was rejected
             sql_lower = sql.lower().strip()
             if not (sql_lower.startswith("select") or sql_lower.startswith("with")):
                 reason = f"Query must start with SELECT or WITH (for CTEs). Found: {sql[:20]}..."
             else:
                 reason = "Query contains forbidden operations (INSERT/UPDATE/DELETE/DROP/etc.)"
-            
             answer = f"⚠️ I can only run SELECT queries. {reason}"
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            with st.chat_message("assistant"):
-                st.markdown(answer)
-                # Show the problematic SQL for debugging
-                with st.expander("🔍 See generated SQL"):
-                    st.code(sql, language="sql")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "thinking": thinking,
+                "unsafe_sql": sql,
+            })
+            st.rerun()
+
         else:
             try:
-                # Execute the CTE-based query
                 rows, cols = run_sql(sql)
                 df_res = pd.DataFrame(rows, columns=list(cols))
-                
-                # Generate insights from results
+
                 from src.text_to_sql.sql_chain import generate_insights_from_results
                 insights = generate_insights_from_results(df_res, user_input)
 
-                # Store result with insights-only thinking
                 summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
                 st.session_state.messages.append({
-                    "role": "assistant", 
+                    "role": "assistant",
                     "content": summary,
                     "sql_result": {"df": df_res, "sql": sql, "insights": insights},
-                    "thinking": thinking  # Insights only, SQL removed
+                    "thinking": thinking,
                 })
-                
-                with st.chat_message("assistant"):
-                    st.markdown(summary)
-                    render_visualization(df_res, sql, len(st.session_state.messages) - 1, insights)
+                # Rerun so the history loop renders everything cleanly (no grey flash)
+                st.rerun()
 
             except Exception as e:
                 answer = f"❌ SQL Execution Error: {str(e)}"
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-                with st.chat_message("assistant"):
-                    st.error(answer)
-                    # Show the SQL that caused the error for debugging
-                    with st.expander("🔍 See SQL that caused error"):
-                        st.code(sql, language="sql")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer,
+                    "thinking": thinking,
+                    "error_sql": sql,
+                })
+                st.rerun()
 
     # ── RAG ────────────────────────────────────────────────────────────────
     else:
@@ -534,19 +559,6 @@ if user_input:
             raw_docs = retriever.invoke(user_input)
         except Exception as e:
             st.warning(f"Retrieval failed: {e}")
-
-        # BUG 1 FIX: Chunks debug panel (was removed, now restored)
-        with st.expander("🔍 Retrieved chunks (highlighted)"):
-            st.write(f"Retrieved **{len(raw_docs)} chunks** from the knowledge base.")
-            for i, doc in enumerate(raw_docs[:6]):  # Show up to 6 chunks
-                st.markdown(f"**Chunk {i+1}:**")
-                st.markdown(
-                    highlight_text(doc.page_content[:800], user_input),
-                    unsafe_allow_html=True,
-                )
-                st.caption(f"Source: {doc.metadata.get('source', 'unknown')}")
-                if i < len(raw_docs) - 1:
-                    st.markdown("---")
 
         seen: set[str] = set()
         docs: list[Document] = []
