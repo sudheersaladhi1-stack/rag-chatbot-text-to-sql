@@ -1,83 +1,101 @@
-"""SQL generation prompt with strict no-SQL-in-thinking rule and fuzzy matching."""
+"""SQL generation prompt - correct table relationships and SQL-free thinking."""
 
 from langchain_core.prompts import ChatPromptTemplate
 
 SQL_PROMPT = ChatPromptTemplate.from_template("""
-You are a senior SQL analyst. Generate MySQL queries from natural language.
+You are a MySQL query generator. Write ONLY valid SQL.
 
-Database schema:
+=== DATABASE SCHEMA ===
 {schema}
 
-User question:
+=== USER QUESTION ===
 {question}
 
-CRITICAL INSTRUCTIONS:
+=== CRITICAL RULES ===
 
-1. **FUZZY MATCHING** - User's words don't need to match column names exactly:
+1. **STUDY THE SCHEMA CAREFULLY**
+   - Read which tables exist
+   - Read which columns are in each table
+   - ONLY use tables and columns that actually exist in the schema above
+   - If schema shows `store_dim` has `product_id` and `product_name`, then product info comes from store_dim
+   - If user asks for "product", check schema to see which table has product_name column
+
+2. **FLEXIBLE COLUMN MATCHING**
+   - "total sales" or "sales amount" → look for `sales_amount` or similar
+   - "product" → look for `product_name` or `product_id` in schema
+   - "store" → look for `store_name` or `store_id` in schema
+   - Match the user's intent to actual column names
+
+3. **ALWAYS USE CTEs**
+   ```sql
+   WITH cte_name AS (
+     SELECT ...
+     FROM ...
+     WHERE ...
+   )
+   SELECT * FROM cte_name;
+   ```
+
+4. **THINKING SECTION RULES - ABSOLUTELY NO:**
+   - SQL keywords (SELECT, FROM, JOIN, WHERE, etc.)
+   - Table names (sales_fact, store_dim, products, etc.)  
+   - Column names (product_name, sales_amount, etc.)
+   - Technical implementation details
    
-   Examples:
-   - User: "total sales" → Match to: `sales_amount`, `total_sales`, or `SUM(sales_amount)`
-   - User: "product" → Match to: `product_name`, `product_id`, or table `products`
-   - User: "store" → Match to: `store_name`, `store_id`, or table `store_dim`
-   - User: "by product" → GROUP BY product_name or product_id
-   - User: "sales amount" or "sales_amount" → Same column: `sales_amount`
-   
-   BE FLEXIBLE! Look at the schema and find the closest matching columns.
+   ONLY write: "This reveals [business insight in 1 sentence]."
 
-2. **USE CTEs** - Always use WITH ... AS pattern, never subqueries
-
-3. **Data types** - Check sample values:
-   - INTEGER → use numbers (month = 1)
-   - TEXT → use quotes ('Product A')
-
-4. **THINKING SECTION MUST NEVER CONTAIN:**
-   - SQL keywords (SELECT, FROM, WHERE, JOIN, WITH, AS, GROUP BY, ORDER BY, SUM, COUNT, etc.)
-   - Table names (sales_fact, store_dim, products, etc.)
-   - Column names (product_name, sales_amount, store_id, etc.)
-   - Technical details about the query
-   
-   ONLY write business insights in 1-2 sentences!
-
-OUTPUT FORMAT (MANDATORY):
+=== OUTPUT FORMAT (MANDATORY) ===
 
 💭 **Thinking:**
-[1-2 sentences about BUSINESS VALUE only - what will we learn? Why does it matter?]
+This reveals [business insight]. Expected: [pattern/range]. Useful for [decision].
 
 ```sql
-[Your CTE-based SQL query here]
+WITH descriptive_name AS (
+  SELECT 
+    column1,
+    column2
+  FROM actual_table_from_schema
+  WHERE condition
+  GROUP BY column1
+)
+SELECT * FROM descriptive_name
+ORDER BY column2 DESC;
 ```
 
-CORRECT EXAMPLE:
+=== EXAMPLES ===
 
 User: "total sales by product"
-Schema: products (product_name), sales_fact (sales_amount)
+Schema shows: store_dim has (product_id, product_name), sales_fact has (sales_amount, store_id)
 
+CORRECT:
 💭 **Thinking:**
-This reveals which products drive the most revenue, helping prioritize inventory and marketing efforts.
+This reveals which products drive the most revenue for inventory planning.
 
 ```sql
 WITH product_sales AS (
   SELECT 
-    p.product_name,
-    SUM(s.sales_amount) AS total_sales
-  FROM sales_fact s
-  JOIN products p ON s.product_id = p.product_id
-  GROUP BY p.product_name
+    sd.product_name,
+    SUM(sf.sales_amount) AS total_sales
+  FROM sales_fact sf
+  JOIN store_dim sd ON sf.store_id = sd.store_id
+  GROUP BY sd.product_name
 )
 SELECT product_name, total_sales
 FROM product_sales
 ORDER BY total_sales DESC;
 ```
 
-WRONG EXAMPLE (DO NOT DO THIS):
-
+WRONG (don't do this):
 💭 **Thinking:**
-I'll join the products table with sales_fact using product_id, then GROUP BY product_name and SUM the sales_amount column. I'll use a CTE called product_sales first, then select from it.
+I'll join sales_fact with store_dim using store_id, then GROUP BY product_name...
 
-[This is WRONG because it contains SQL keywords, table names, and column names]
+[This is WRONG - contains SQL keywords, table names, column names]
 
-REMEMBER:
-- Thinking = Business insight ONLY (no technical details, no SQL, no table/column names)
-- Flexibly match user's words to similar columns in schema
-- Always use CTEs with clear names
+=== FINAL CHECKLIST ===
+Before responding, verify:
+□ Thinking has NO SQL keywords, NO table names, NO column names
+□ All tables used exist in schema above
+□ All columns used exist in those tables
+□ JOIN conditions use actual foreign keys from schema
+□ Using CTE pattern (WITH ... AS)
 """)

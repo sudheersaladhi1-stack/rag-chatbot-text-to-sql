@@ -47,10 +47,7 @@ def extract_thinking_and_sql(response: str) -> tuple[str, str]:
     """
     Extract thinking (completely SQL-free) and SQL separately.
     
-    Strategy:
-    1. Find SQL query in ```sql blocks
-    2. Extract everything before first SQL keyword as thinking
-    3. Aggressively remove ANY line containing SQL patterns
+    Ultra-aggressive: Remove ENTIRE thinking if it contains ANY SQL.
     
     Returns:
         (thinking_text, sql_query)
@@ -72,27 +69,34 @@ def extract_thinking_and_sql(response: str) -> tuple[str, str]:
         thinking_raw = response.split("```sql")[0]
     elif sql:
         # SQL found but no markers - split before it
-        sql_start = response.upper().find(sql[:20].upper())
-        if sql_start > 0:
-            thinking_raw = response[:sql_start]
+        sql_start_idx = response.upper().find(sql[:30].upper() if len(sql) >= 30 else sql.upper())
+        if sql_start_idx > 0:
+            thinking_raw = response[:sql_start_idx]
         else:
             thinking_raw = ""
     else:
         thinking_raw = response
     
     # Clean thinking
-    thinking_raw = thinking_raw.replace("💭", "").replace("**Thinking:**", "").strip()
+    thinking_raw = thinking_raw.replace("💭", "").replace("**Thinking:**", "").replace("Thinking:", "").strip()
     
-    # AGGRESSIVELY remove ALL SQL-like lines
-    sql_patterns = [
+    # ULTRA-AGGRESSIVE: Remove ALL lines containing SQL patterns
+    # Expanded list of SQL indicators
+    sql_indicators = [
+        # SQL keywords
         'SELECT', 'FROM', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'OUTER',
-        'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
-        'WITH', 'AS (', 'AS(', 'CTE', 
-        'SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN(', 'ROUND(',
-        'DISTINCT', 'UNION', 'INTERSECT', 'EXCEPT',
-        'ON ', '= ', 'AND ', 'OR ',
-        '_id', '_name', '_amount', '_date', '_fact', '_dim',
-        'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER'
+        'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET', 'DISTINCT',
+        'WITH', 'AS (', 'AS(', 'CTE', 'UNION', 'INTERSECT', 'EXCEPT',
+        # SQL functions
+        'SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN(', 'ROUND(', 'FLOOR(', 'CEIL(',
+        'CONCAT(', 'SUBSTRING(', 'UPPER(', 'LOWER(', 'TRIM(',
+        'DATE(', 'YEAR(', 'MONTH(', 'DAY(', 'NOW(', 'CURRENT_',
+        # Table/column patterns
+        '_ID', '_NAME', '_AMOUNT', '_DATE', '_FACT', '_DIM', '_TABLE',
+        'SALES_', 'PRODUCT_', 'STORE_', 'CUSTOMER_', 'ORDER_',
+        # Technical terms
+        'ALIAS', 'FOREIGN KEY', 'PRIMARY KEY', 'INDEX', 'CONSTRAINT',
+        'PARTITION', 'SUBQUERY', 'AGGREGATE', 'WINDOW FUNCTION',
     ]
     
     lines = thinking_raw.split('\n')
@@ -100,20 +104,22 @@ def extract_thinking_and_sql(response: str) -> tuple[str, str]:
     
     for line in lines:
         line_stripped = line.strip()
-        if not line_stripped:
+        if not line_stripped or len(line_stripped) < 10:  # Skip empty or very short lines
             continue
             
         line_upper = line_stripped.upper()
         
-        # Check if line contains ANY SQL pattern
-        has_sql = any(pattern in line_upper for pattern in sql_patterns)
+        # Check if line contains ANY SQL indicator
+        has_sql = any(indicator in line_upper for indicator in sql_indicators)
         
-        # Also check for common SQL punctuation patterns
-        if '(' in line and ')' in line and '=' in line:
+        # Additional heuristics for SQL detection
+        if '(' in line and ')' in line and '=' in line:  # SQL expressions
             has_sql = True
-        if line_stripped.count(',') > 2:  # Multiple commas suggest column list
+        if line_stripped.count(',') >= 2:  # Column lists
             has_sql = True
-        if line_upper.startswith(('TABLE', 'COLUMN', 'INDEX', 'DATABASE')):
+        if any(char in line for char in [';', '`']):  # SQL punctuation
+            has_sql = True
+        if line_upper.startswith(('TABLE', 'COLUMN', 'DATABASE', 'SCHEMA')):
             has_sql = True
             
         if not has_sql:
@@ -121,9 +127,14 @@ def extract_thinking_and_sql(response: str) -> tuple[str, str]:
     
     thinking = ' '.join(cleaned_lines).strip()
     
-    # If thinking is too short or empty, provide generic fallback
-    if len(thinking) < 20:
-        thinking = "Analyzing data to provide business insights."
+    # Final cleanup: If thinking still looks like SQL, replace entirely
+    if not thinking or len(thinking) < 15:
+        thinking = "Analyzing data to extract business insights."
+    
+    # Extra safety: If ANY SQL keyword remains, clear it
+    final_check = thinking.upper()
+    if any(kw in final_check for kw in ['SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP', 'ORDER']):
+        thinking = "Generating insights from the data analysis."
     
     return thinking, sql
 
