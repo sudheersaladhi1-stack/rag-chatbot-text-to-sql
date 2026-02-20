@@ -38,10 +38,6 @@ OUTPUT FORMAT:
 [ONLY business insights - NO SQL keywords, NO table names, NO column names]
 [Example: "This analysis reveals top performers in the category. Expected: 5-10 items with $50K+ revenue."]
 
-```sql
-[Your CTE-based SQL query]
-```
-
 EXAMPLES:
 
 User: "total sales by store name"
