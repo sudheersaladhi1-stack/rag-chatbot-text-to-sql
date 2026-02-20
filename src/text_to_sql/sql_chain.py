@@ -4,6 +4,7 @@ import re
 from langchain_openai import ChatOpenAI
 from .schema_loader import get_schema
 from .sql_prompt import SQL_PROMPT
+from ._version import VERSION  # Force reload when version changes
 
 
 llm = ChatOpenAI(
