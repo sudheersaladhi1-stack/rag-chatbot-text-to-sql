@@ -339,12 +339,21 @@ st.session_state.setdefault("messages", [])
 # StreamlitDuplicateElementKey when rendering multiple
 # SQL results in chat history.
 # =====================================================
-def render_visualization(df_res: pd.DataFrame, sql: str, msg_index: int) -> None:
+def render_visualization(df_res: pd.DataFrame, sql: str, msg_index: int, insights: str = "") -> None:
     st.markdown("---")
     st.subheader("📊 Query Results")
     st.code(sql, language="sql")
-    st.dataframe(df_res, use_container_width=True)
+    
+    # Reset index to start from 1 instead of 0
+    df_display = df_res.copy()
+    df_display.index = range(1, len(df_display) + 1)
+    
+    st.dataframe(df_display, use_container_width=True)
     st.caption(f"✅ {len(df_res):,} rows returned.")
+    
+    # Show insights if available
+    if insights:
+        st.info(f"💡 **Key Insights:** {insights}")
 
     df_vis = df_res.copy()
     for c in df_vis.columns:
@@ -360,7 +369,7 @@ def render_visualization(df_res: pd.DataFrame, sql: str, msg_index: int) -> None
             chart_type = st.selectbox(
                 "Chart type", 
                 ["Bar", "Line", "Area", "Pie"], 
-                key=f"chart_type_{msg_index}"  # Unique key per message
+                key=f"chart_type_{msg_index}"
             )
         with col2:
             x_col = st.selectbox(
@@ -409,10 +418,12 @@ for idx, msg in enumerate(st.session_state.messages):
         # If this message has associated SQL results, render them here
         if msg["role"] == "assistant" and msg.get("sql_result"):
             result_data = msg["sql_result"]
+            insights = result_data.get("insights", "")
             render_visualization(
                 result_data["df"], 
                 result_data["sql"],
-                idx  # BUG 2 FIX: unique index for widget keys
+                idx,  # BUG 2 FIX: unique index for widget keys
+                insights
             )
 
 
@@ -493,19 +504,23 @@ if user_input:
                 # Execute the CTE-based query
                 rows, cols = run_sql(sql)
                 df_res = pd.DataFrame(rows, columns=list(cols))
+                
+                # Generate insights from results
+                from src.text_to_sql.sql_chain import generate_insights_from_results
+                insights = generate_insights_from_results(df_res, user_input)
 
                 # Store result with insights-only thinking
                 summary = f"✅ Query executed. **{len(df_res):,} rows** returned."
                 st.session_state.messages.append({
                     "role": "assistant", 
                     "content": summary,
-                    "sql_result": {"df": df_res, "sql": sql},
+                    "sql_result": {"df": df_res, "sql": sql, "insights": insights},
                     "thinking": thinking  # Insights only, SQL removed
                 })
                 
                 with st.chat_message("assistant"):
                     st.markdown(summary)
-                    render_visualization(df_res, sql, len(st.session_state.messages) - 1)
+                    render_visualization(df_res, sql, len(st.session_state.messages) - 1, insights)
 
             except Exception as e:
                 answer = f"❌ SQL Execution Error: {str(e)}"

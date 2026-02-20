@@ -1,4 +1,4 @@
-"""Text-to-SQL chain with CTE-based queries and insight extraction."""
+"""Text-to-SQL chain with insights generation and SQL-free thinking."""
 
 import re
 from langchain_openai import ChatOpenAI
@@ -45,41 +45,13 @@ def format_schema_for_llm(schema: dict) -> str:
 
 def extract_thinking_and_sql(response: str) -> tuple[str, str]:
     """
-    Extract thinking (insights only) and SQL separately.
-    Remove any SQL code from the thinking section.
+    Extract thinking (NO SQL) and SQL separately.
+    Aggressively remove ALL SQL-like content from thinking.
     
     Returns:
         (thinking_text, sql_query)
     """
-    # Extract thinking section
-    thinking_match = re.search(
-        r"💭\s*\*\*Thinking:\*\*(.*?)```sql",
-        response,
-        re.DOTALL | re.IGNORECASE
-    )
-    
-    if thinking_match:
-        thinking = thinking_match.group(1).strip()
-    else:
-        # Fallback: everything before first ```sql
-        parts = response.split("```sql")
-        thinking = parts[0].replace("💭", "").replace("**Thinking:**", "").strip()
-    
-    # Remove any SQL-like patterns from thinking
-    # (table names, WHERE clauses, SELECT statements)
-    sql_patterns = [
-        r'\bSELECT\b.*',
-        r'\bFROM\b.*',
-        r'\bWHERE\b.*',
-        r'\bGROUP BY\b.*',
-        r'\bORDER BY\b.*',
-        r'\bWITH\b\s+\w+\s+AS\b.*',
-    ]
-    
-    for pattern in sql_patterns:
-        thinking = re.sub(pattern, '', thinking, flags=re.IGNORECASE | re.DOTALL)
-    
-    # Extract SQL query
+    # Extract SQL query first
     sql_match = re.search(
         r"```sql\s*(.*?)\s*```",
         response,
@@ -88,14 +60,92 @@ def extract_thinking_and_sql(response: str) -> tuple[str, str]:
     
     if sql_match:
         sql = sql_match.group(1).strip()
+        # Remove everything from first ```sql onwards to get thinking
+        thinking = response.split("```sql")[0]
     else:
-        # Fallback: check if entire response is SQL
+        # No SQL found
         if response.strip().upper().startswith(("SELECT", "WITH")):
             sql = response.strip()
+            thinking = ""
         else:
             sql = ""
+            thinking = response
+    
+    # Clean thinking section
+    thinking = thinking.replace("💭", "").replace("**Thinking:**", "").strip()
+    
+    # AGGRESSIVELY remove ALL SQL-like patterns from thinking
+    # Remove entire lines containing SQL keywords
+    sql_keywords = [
+        'SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP BY', 'ORDER BY', 
+        'WITH', 'AS (', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN',
+        'ON ', '= ', 'SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN(',
+        'DISTINCT', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'CASE WHEN'
+    ]
+    
+    lines = thinking.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line_upper = line.upper()
+        has_sql = any(keyword in line_upper for keyword in sql_keywords)
+        if not has_sql and line.strip():
+            cleaned_lines.append(line)
+    
+    thinking = '\n'.join(cleaned_lines).strip()
     
     return thinking, sql
+
+
+def generate_insights_from_results(df, question: str) -> str:
+    """
+    Generate business insights from query results.
+    
+    Args:
+        df: pandas DataFrame with results
+        question: original user question
+    
+    Returns:
+        Insight text (e.g., "Highest: Product A ($50K), Lowest: Product Z ($5K)")
+    """
+    if df.empty or len(df) == 0:
+        return ""
+    
+    insights = []
+    
+    # Check if there's a numeric column (sales, revenue, amount, etc.)
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    text_cols = df.select_dtypes(include=['object']).columns
+    
+    if len(numeric_cols) > 0 and len(text_cols) > 0:
+        # Likely a ranking or comparison query
+        metric_col = numeric_cols[0]
+        label_col = text_cols[0]
+        
+        # Get top and bottom
+        if len(df) >= 2:
+            top_row = df.iloc[0]
+            bottom_row = df.iloc[-1]
+            
+            top_label = top_row[label_col]
+            top_value = top_row[metric_col]
+            bottom_label = bottom_row[label_col]
+            bottom_value = bottom_row[metric_col]
+            
+            insights.append(
+                f"**Highest:** {top_label} ({top_value:,.0f})"
+            )
+            insights.append(
+                f"**Lowest:** {bottom_label} ({bottom_value:,.0f})"
+            )
+            
+            # Calculate spread
+            if bottom_value > 0:
+                spread = ((top_value - bottom_value) / bottom_value) * 100
+                insights.append(
+                    f"**Spread:** {spread:.1f}% difference between top and bottom"
+                )
+    
+    return " | ".join(insights) if insights else ""
 
 
 def generate_sql(question: str, stream_callback=None) -> dict:
@@ -108,7 +158,7 @@ def generate_sql(question: str, stream_callback=None) -> dict:
     
     Returns:
         dict with:
-            - 'thinking': Business insights only (no SQL)
+            - 'thinking': Business insights only (NO SQL)
             - 'sql': SQL query string
             - 'full_response': Complete LLM output
     """
@@ -146,7 +196,7 @@ def generate_sql(question: str, stream_callback=None) -> dict:
             )
             full_response = response.content
         
-        # Extract thinking and SQL separately
+        # Extract thinking (SQL-free) and SQL separately
         thinking, sql = extract_thinking_and_sql(full_response)
         
         return {
