@@ -31,9 +31,6 @@ OUTPUT FORMAT:
 💭 **Thinking:**
 [2-3 sentences max - what business insight will this reveal? What metric/KPI? Expected trend?]
 
-```sql
-[Your SQL query using CTEs]
-```
 
 EXAMPLES:
 
@@ -60,5 +57,4 @@ Good thinking (concise, insights-focused):
 IMPORTANT:
 - Thinking = ONLY business insights (2-3 sentences max)
 - SQL = Separate code block using CTEs
-- NO SQL syntax in thinking section
 """)
