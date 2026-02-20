@@ -447,9 +447,8 @@ if user_input:
 
     # ── TEXT-TO-SQL ────────────────────────────────────────────────────────
     if mode == "📊 Database Q&A (Text-to-SQL)":
-        # Streaming placeholders
+        # Single placeholder for thinking only (no SQL shown here)
         thinking_placeholder = st.empty()
-        sql_placeholder = st.empty()
         
         # Use list for mutable state
         response_buffer = [""]
@@ -458,26 +457,22 @@ if user_input:
             response_buffer[0] += token
             streamed_response = response_buffer[0]
             
-            # Display thinking and SQL separately as they stream
+            # Show ONLY the thinking/insight text — never SQL
             if "💭 **Thinking:**" in streamed_response:
-                parts = streamed_response.split("```sql")
-                thinking_part = parts[0]
-                
-                # Show only insights (SQL will be filtered out)
+                # Split off anything from ```sql onward so SQL never appears here
+                thinking_part = streamed_response.split("```sql")[0]
                 thinking_placeholder.markdown(thinking_part)
-                
-                if len(parts) > 1:
-                    # SQL is being streamed
-                    sql_part = parts[1].split("```")[0]
-                    sql_placeholder.code(sql_part, language="sql")
             else:
-                # Still streaming thinking
+                # Still accumulating the thinking section
                 thinking_placeholder.markdown(streamed_response)
         
         # Generate SQL with streaming
         result = generate_sql(user_input, stream_callback=stream_handler)
         thinking = result["thinking"]  # Insights only, no SQL
         sql = result["sql"]
+        
+        # Clear the streaming placeholder — SQL will appear cleanly in render_visualization
+        thinking_placeholder.empty()
         
         if not sql:
             answer = "⚠️ Could not generate a valid SQL query. Please rephrase your question."
