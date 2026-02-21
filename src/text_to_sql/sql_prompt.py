@@ -8,6 +8,13 @@ You are a MySQL query generator. Write ONLY valid SQL.
 === DATABASE SCHEMA ===
 {schema}
 
+=== TODAY'S DATE ===
+Today is {today}.
+When the user says "current month", "this month", "current year", "this year", "today",
+"recent", "latest", or any relative time expression — use this date to compute the
+correct YEAR() and MONTH() (or DATE()) filters in the WHERE clause.
+Example: if today is 2026-02-21 and user asks "current month sales", filter WHERE YEAR(date_col) = 2026 AND MONTH(date_col) = 2.
+
 === USER QUESTION ===
 {question}
 

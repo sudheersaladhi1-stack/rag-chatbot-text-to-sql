@@ -1,6 +1,7 @@
 """Text-to-SQL chain with aggressive SQL removal from thinking."""
 
 import re
+from datetime import date
 from langchain_openai import ChatOpenAI
 from .schema_loader import get_schema
 from .sql_prompt import SQL_PROMPT
@@ -140,49 +141,35 @@ def extract_thinking_and_sql(response: str) -> tuple[str, str]:
 
 
 def generate_insights_from_results(df, question: str) -> str:
-    """Generate 2-sentence business insights from query results using LLM."""
+    """Generate business insights from query results."""
     if df.empty or len(df) == 0:
         return ""
     
-    try:
-        # Build a compact summary of the data for the LLM
-        preview = df.head(10).to_string(index=False)
-        total_rows = len(df)
-
-        insight_prompt = (
-            f"You are a business analyst. A user asked: \"{question}\"\n\n"
-            f"The query returned {total_rows} rows. Here is a preview:\n{preview}\n\n"
-            "Write exactly 2 concise sentences of business insight based on this data. "
-            "Focus on the most important pattern, trend, or takeaway. "
-            "Do NOT mention SQL, tables, columns, or technical details. "
-            "Output only the 2 sentences, nothing else."
-        )
-
-        insight_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.3)
-        response = insight_llm.invoke(insight_prompt)
-        return response.content.strip()
-
-    except Exception:
-        # Fallback to lightweight rule-based insights
-        insights = []
-        numeric_cols = df.select_dtypes(include=['number']).columns
-        text_cols = df.select_dtypes(include=['object']).columns
-
-        if len(numeric_cols) > 0 and len(text_cols) > 0:
-            metric_col = numeric_cols[0]
-            label_col = text_cols[0]
-            if len(df) >= 2:
-                top_row = df.iloc[0]
-                bottom_row = df.iloc[-1]
-                insights.append(
-                    f"{top_row[label_col]} leads with {top_row[metric_col]:,.0f}, "
-                    f"while {bottom_row[label_col]} trails at {bottom_row[metric_col]:,.0f}."
-                )
-                if bottom_row[metric_col] > 0:
-                    spread = ((top_row[metric_col] - bottom_row[metric_col]) / bottom_row[metric_col]) * 100
-                    insights.append(f"There is a {spread:.1f}% spread between the highest and lowest values.")
-
-        return " ".join(insights)
+    insights = []
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    text_cols = df.select_dtypes(include=['object']).columns
+    
+    if len(numeric_cols) > 0 and len(text_cols) > 0:
+        metric_col = numeric_cols[0]
+        label_col = text_cols[0]
+        
+        if len(df) >= 2:
+            top_row = df.iloc[0]
+            bottom_row = df.iloc[-1]
+            
+            top_label = top_row[label_col]
+            top_value = top_row[metric_col]
+            bottom_label = bottom_row[label_col]
+            bottom_value = bottom_row[metric_col]
+            
+            insights.append(f"**Highest:** {top_label} ({top_value:,.0f})")
+            insights.append(f"**Lowest:** {bottom_label} ({bottom_value:,.0f})")
+            
+            if bottom_value > 0:
+                spread = ((top_value - bottom_value) / bottom_value) * 100
+                insights.append(f"**Spread:** {spread:.1f}% difference")
+    
+    return " | ".join(insights) if insights else ""
 
 
 def generate_sql(question: str, stream_callback=None) -> dict:
@@ -206,12 +193,14 @@ def generate_sql(question: str, stream_callback=None) -> dict:
     try:
         if stream_callback:
             full_response = ""
-            for chunk in llm.stream(SQL_PROMPT.format(schema=schema_text, question=question)):
+            today_str = date.today().strftime("%Y-%m-%d")
+            for chunk in llm.stream(SQL_PROMPT.format(schema=schema_text, question=question, today=today_str)):
                 token = chunk.content
                 full_response += token
                 stream_callback(token)
         else:
-            response = llm.invoke(SQL_PROMPT.format(schema=schema_text, question=question))
+            today_str = date.today().strftime("%Y-%m-%d")
+            response = llm.invoke(SQL_PROMPT.format(schema=schema_text, question=question, today=today_str))
             full_response = response.content
         
         thinking, sql = extract_thinking_and_sql(full_response)
